@@ -6,10 +6,15 @@
 //! preview would give a branch under review the ability to start privileged
 //! containers on the host, which is a host compromise, not a preview.
 
-use eren_shared::env_guard;
+use eren_shared::{brand, env_guard};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::OnceLock;
 
 const DOCKER: &str = "docker";
+
+/// Where the CLI looks for the daemon when `DOCKER_HOST` names nowhere else.
+const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 
 /// Every container Eren starts carries this, so a sweep can find them all
 /// and can never touch one the user started themselves.
@@ -21,6 +26,131 @@ fn owner_labels() -> impl Iterator<Item = String> {
     eren_shared::brand::NAMES
         .iter()
         .map(|n| format!("label=com.{n}.preview=1"))
+}
+
+// ── Where a preview is ─────────────────────────────────────────────────────
+//
+// On the machine itself both answers are loopback: Docker publishes on the
+// host's 127.0.0.1 and Eren, on the same host, dials it there. Inside a
+// container they come apart. Docker is the *host's* daemon (its socket handed
+// in), so it still publishes on the host, while the container's 127.0.0.1 is
+// its own — so Eren has to dial the host by name (`host.docker.internal`),
+// and on a Linux host, where that name is the bridge gateway and a port
+// published on loopback is not reachable through it, Docker has to publish on
+// that gateway instead. Two settings, because those are two different places.
+
+/// The host address previews are published on: `EREN_PREVIEW_PUBLISH_IP`,
+/// else loopback. Never every interface — see [`run`].
+pub fn publish_ip() -> IpAddr {
+    static IP: OnceLock<IpAddr> = OnceLock::new();
+    *IP.get_or_init(|| {
+        parse_publish_ip(brand::var("PREVIEW_PUBLISH_IP").as_deref()).unwrap_or_else(|e| {
+            tracing::warn!("{e}; publishing previews on 127.0.0.1");
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        })
+    })
+}
+
+/// The host Eren dials a preview on: `EREN_PREVIEW_HOST`, else loopback.
+fn dial_host() -> &'static str {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| {
+        parse_dial_host(brand::var("PREVIEW_HOST").as_deref()).unwrap_or_else(|e| {
+            tracing::warn!("{e}; dialling previews on 127.0.0.1");
+            "127.0.0.1".into()
+        })
+    })
+}
+
+/// Where Docker publishes a preview on `port`, as Docker and a browser on the
+/// Docker host spell it (`127.0.0.1:5000`, `[::1]:5000`).
+pub fn published(port: u16) -> SocketAddr {
+    SocketAddr::new(publish_ip(), port)
+}
+
+/// `host:port` for Eren's own connection to a preview on `port`.
+pub fn dialled(port: u16) -> String {
+    format!("{}:{port}", dial_host())
+}
+
+fn parse_publish_ip(value: Option<&str>) -> Result<IpAddr, String> {
+    let name = brand::env_name("PREVIEW_PUBLISH_IP");
+    let Some(text) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    };
+    let ip: IpAddr = text
+        .parse()
+        .map_err(|_| format!("{name}={text:?} is not an IP address"))?;
+    // Every interface puts an unreviewed branch on every network the machine
+    // is on. Not a setting; a different product.
+    if ip.is_unspecified() {
+        return Err(format!(
+            "{name}={text} would publish previews on every interface"
+        ));
+    }
+    Ok(ip)
+}
+
+fn parse_dial_host(value: Option<&str>) -> Result<String, String> {
+    let name = brand::env_name("PREVIEW_HOST");
+    let Some(text) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok("127.0.0.1".into());
+    };
+    if let Ok(ip) = text.trim_matches(['[', ']']).parse::<IpAddr>() {
+        return Ok(match ip {
+            IpAddr::V6(v6) => format!("[{v6}]"),
+            IpAddr::V4(v4) => v4.to_string(),
+        });
+    }
+    // A bare host name, nothing else: it goes straight into a URL.
+    let is_name = text.len() <= 253
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if is_name {
+        Ok(text.to_ascii_lowercase())
+    } else {
+        Err(format!("{name}={text:?} is not a host name or IP address"))
+    }
+}
+
+/// Is Eren itself running inside a container? Docker and OrbStack leave
+/// `/.dockerenv`, Podman `/run/.containerenv`.
+fn in_container() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
+/// What [`detect`] found, as the sentence a person needs, or `None` when
+/// Docker answers. In a container every failure has a different fix from the
+/// same failure on a laptop, so it says that one.
+pub fn explain(detected: &Option<Result<String, String>>) -> Option<String> {
+    const SEE: &str = "See \"Previews in Docker\" in README.md.";
+    let contained = in_container();
+    match detected {
+        Some(Ok(_)) => None,
+        None if contained => Some(format!(
+            "Eren is running in a container whose image has no Docker CLI. \
+             Rebuild it from this repository's Dockerfile. {SEE}"
+        )),
+        None => Some("Docker isn't installed, or isn't on this machine's PATH.".into()),
+        Some(Err(_))
+            if contained
+                && std::env::var_os("DOCKER_HOST").is_none()
+                && !Path::new(DEFAULT_SOCKET).exists() =>
+        {
+            Some(format!(
+                "Eren is running in a container that has not been handed Docker. \
+                 Start it with docker-compose.previews.yml as well. {SEE}"
+            ))
+        }
+        Some(Err(detail)) if contained && detail.contains("permission denied") => Some(format!(
+            "Eren's container can see Docker's socket but may not use it: set \
+             EREN_DOCKER_GID to the socket's group and restart. {SEE}"
+        )),
+        Some(Err(detail)) => Some(format!(
+            "Docker is installed but its daemon isn't responding. {detail}"
+        )),
+    }
 }
 
 /// Is Docker here *and* running? `None` means the CLI is missing.
@@ -108,9 +238,11 @@ pub async fn build(
 /// The flags here are the slice's security surface, and each one is load
 /// bearing:
 ///
-/// * `-p 127.0.0.1:host:container` — **loopback only**. Publishing on
-///   `0.0.0.0` would put an unreviewed branch on every network this machine is
-///   attached to, which on a laptop means the café wifi.
+/// * `-p 127.0.0.1:host:container` — **loopback only** ([`publish_ip`];
+///   a containerised Eren on Linux moves it to the bridge gateway, never
+///   further). Publishing on `0.0.0.0` would put an unreviewed branch on every
+///   network this machine is attached to, which on a laptop means the café
+///   wifi.
 /// * `--memory` / `--cpus` / `--pids-limit` — a preview that spins is a
 ///   preview that takes the machine down with it, and the machine is also
 ///   running your editor and the rest of your work.
@@ -135,7 +267,7 @@ pub async fn run(
         .args(["run", "--detach"])
         .args(["--name", name])
         .args(["--label", &format!("{OWNER_LABEL}=1")])
-        .args(["-p", &format!("127.0.0.1:{host_port}:{container_port}")])
+        .args(["-p", &format!("{}:{container_port}", published(host_port))])
         .args(["--memory", "2g", "--cpus", "2", "--pids-limit", "512"])
         .args(["--security-opt", "no-new-privileges"])
         // Docker restarts containers on daemon boot otherwise; a preview
@@ -456,6 +588,35 @@ fn tail(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_are_published_on_loopback_unless_told_otherwise() {
+        let ip = |v| parse_publish_ip(v).map(|ip| ip.to_string());
+        assert_eq!(ip(None).unwrap(), "127.0.0.1");
+        assert_eq!(ip(Some("  ")).unwrap(), "127.0.0.1");
+        assert_eq!(ip(Some("172.17.0.1")).unwrap(), "172.17.0.1");
+        assert_eq!(ip(Some("::1")).unwrap(), "::1");
+        // Every interface is not a place to publish a branch under review.
+        assert!(ip(Some("0.0.0.0")).is_err());
+        assert!(ip(Some("::")).is_err());
+        assert!(ip(Some("localhost")).is_err());
+    }
+
+    #[test]
+    fn a_dial_host_is_a_name_or_an_address_and_nothing_else() {
+        let host = |v| parse_dial_host(v);
+        assert_eq!(host(None).unwrap(), "127.0.0.1");
+        assert_eq!(
+            host(Some("host.docker.internal")).unwrap(),
+            "host.docker.internal"
+        );
+        assert_eq!(host(Some("::1")).unwrap(), "[::1]");
+        assert_eq!(host(Some("[::1]")).unwrap(), "[::1]");
+        // It goes into a URL, so nothing that could reshape one.
+        for bad in ["evil.example/x", "a@b", "host:80", "a b"] {
+            assert!(host(Some(bad)).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn reads_dockers_own_size_spelling() {

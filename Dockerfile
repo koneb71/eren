@@ -52,11 +52,22 @@ FROM debian:trixie-slim
 ARG CLAUDE_CODE_VERSION=2.1.259
 # git: worktrees are the whole isolation model. node: the CLI ships as an npm
 # package. ca-certificates: the CLI talks to Anthropic over TLS.
+#
+# The Docker CLI with its compose and buildx plugins, for previews and
+# container apps — the client only, no daemon. It does nothing until
+# docker-compose.previews.yml hands the container the host's socket, and
+# that is a decision, not a default: read "Previews in Docker" in README.md.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
     && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 

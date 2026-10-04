@@ -1075,7 +1075,9 @@ text the whole way, so a ledger does not lose cents to a double on its way to a 
 A card in review is a diff, and reading a diff is a poor way to answer "does this look
 right". A **preview** ([`eren_core::previews`](crates/eren-core/src/previews/mod.rs)) builds
 the card's branch — its root `Dockerfile`, or its compose file — and serves it on
-`<name>.preview.localhost`, so the question can be answered by looking. It needs Docker.
+`<name>.preview.localhost`, so the question can be answered by looking. It needs Docker —
+and when Eren itself runs in a container, the host's Docker handed in; see
+[previews in Docker](#previews-in-docker).
 
 It is deliberately not a deployment feature. One container per card; memory, CPU and
 process caps on each; loopback-only publishing; three live previews at once by default;
@@ -1234,6 +1236,8 @@ does not read a `.env` file — only Docker Compose does.
 | `EREN_WEB_DIST` | `web/dist` | Where the dashboard build is served from, relative to the working directory unless absolute. |
 | `EREN_BROWSE_ROOT` | `$HOME` | The only tree the folder browser may show. In a container, point it at wherever your code is mounted. |
 | `EREN_APPS_DIR` | `~/.eren/apps` | Where apps live. |
+| `EREN_PREVIEW_HOST` | `127.0.0.1` | The host Eren connects to a preview or container app on. Only Eren in a container needs another: `host.docker.internal`, which `docker-compose.previews.yml` sets — see [previews in Docker](#previews-in-docker). A host name or IP address, nothing else. |
+| `EREN_PREVIEW_PUBLISH_IP` | `127.0.0.1` | The host address Docker publishes previews on. Only Eren in a container on a Linux host needs another, the bridge gateway (`172.17.0.1`). Every interface (`0.0.0.0`, `::`) is refused, falling back to loopback. |
 | `EREN_S3_ENDPOINT` | unset | Object storage for knowledge-base files, e.g. `http://127.0.0.1:9100`. Storage is on only when this, the access key and the secret key are all set. |
 | `EREN_S3_ACCESS_KEY` | unset | Its access key. Stripped from every process Eren starts. |
 | `EREN_S3_SECRET_KEY` | unset | Its secret key. Stripped from every process Eren starts. |
@@ -1466,7 +1470,8 @@ server with Rust on Debian trixie, and a runtime with git, Node and the `claude`
 runs everything, dashboard, orchestrator and agents, in containers, reachable at
 `http://localhost:4820` (`EREN_PORT` to change it). The image runs `eren serve --headless`
 as a normal user. Only Claude Code is installed in it; other engines would need adding to
-the image.
+the image. Previews and container apps need one more decision, described under
+[previews in Docker](#previews-in-docker).
 
 Every port the compose file publishes — Eren, Postgres, object storage — is bound to `127.0.0.1`
 on the host. Inside the container Eren binds `0.0.0.0` (the image sets `EREN_BIND` and
@@ -1502,6 +1507,49 @@ exists to leak, every engine you have installed is available, and your paths are
 real. Containerize the whole thing when you want it on a Linux box, running unattended, or
 away from your laptop — not because it's tidier.
 
+### Previews in Docker
+
+[Previews](#previews) and container [apps](#apps) run on Docker, and a container has none of
+its own. The image carries the Docker CLI; what it needs is the host's daemon, which
+`docker-compose.previews.yml` hands in as its socket:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.previews.yml --profile app up -d --build
+```
+
+or `COMPOSE_FILE=docker-compose.yml:docker-compose.previews.yml` in `.env`, after which every
+plain `docker compose` command, and `docker-deploy.sh`, includes it.
+
+**This is root on the host, for every agent.** Whatever can use Docker's socket can start a
+privileged container with `/` mounted. Eren itself only builds and runs previews with it —
+and those still get no socket, no mount and no privileges — but the agents in this container
+have a shell, so with the socket any agent run can do the same. Without it they are confined
+to the container and the folder you mounted. That is why this is a separate file and not part
+of `docker-compose.yml`. If that trade is wrong for you, run Eren on the host instead (the
+recommended shape, above), where previews need nothing extra.
+
+What the override sets, and why:
+
+- the socket, `/var/run/docker.sock` (`EREN_DOCKER_SOCKET` for another path) — Docker Desktop
+  and OrbStack understand that path even on a Mac, where no such file exists on the host;
+- the socket's group for the container user (`EREN_DOCKER_GID`, default `0`: Docker Desktop and
+  OrbStack hand the socket in as `root:root 0660`; on Linux,
+  `EREN_DOCKER_GID=$(stat -c %g /var/run/docker.sock)`);
+- `EREN_PREVIEW_HOST=host.docker.internal`, because Docker publishes a preview on the *host*,
+  and the container's `127.0.0.1` is its own.
+
+On a **Linux host**, also set `EREN_PREVIEW_PUBLISH_IP=172.17.0.1` (your bridge gateway, if your
+daemon moved it): a port on the host's loopback is not reachable from a container there, and
+the gateway is still not your network. Docker Desktop and OrbStack keep loopback.
+
+Two things stay different from a host install. The preview's own link on the card,
+`http://<publish address>:<port>`, opens only on the Docker host; the
+`<name>.preview.localhost` address goes through Eren and works wherever the dashboard does.
+And a compose stack that bind-mounts its source (`./src:/app`) gets an empty folder when
+previewing a card: card worktrees live in Eren's state volume, which the host's daemon cannot
+see. A build that `COPY`s its source, which is what most Dockerfiles do, is unaffected. When
+Docker still isn't usable, the Previews tab says which of these is missing.
+
 ### From a published image
 
 To build once and run the image elsewhere — a Linux box, a server — without the source or a
@@ -1535,7 +1583,8 @@ repository. It reads `EREN_IMAGE` and `EREN_TAG` (default `latest`) from `.env`,
 and starts Postgres and Eren with `--no-build`, so it never falls back to building from
 source; it warns when `CLAUDE_CODE_OAUTH_TOKEN` or `EREN_PROJECTS_DIR` is missing.
 `--tag <hash>` deploys (or rolls back to) one build, `--with-storage` adds object storage,
-`--down` stops everything and keeps the volumes. To deploy to another machine from this one,
+`--with-previews` adds `docker-compose.previews.yml` (copy it alongside; read
+[previews in Docker](#previews-in-docker) first), `--down` stops everything and keeps the volumes. To deploy to another machine from this one,
 `DOCKER_HOST=ssh://you@server ./scripts/docker-deploy.sh` — `.env` is then read locally and
 `EREN_PROJECTS_DIR` names a path on the server. Everything above about the token, ports and
 mounts applies unchanged: it is the same compose service, pulled instead of built.

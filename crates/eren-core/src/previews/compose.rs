@@ -62,7 +62,7 @@ impl Plan {
     /// port has to be chosen before the file is written — and it is why the
     /// image names go here too: `docker compose up --build` has no `--label`
     /// either, so the file is the only place to say either thing.
-    pub fn render(&self, preview_id: &uuid::Uuid, host_port: u16) -> String {
+    pub fn render(&self, preview_id: &uuid::Uuid, publish: std::net::SocketAddr) -> String {
         let mut doc = self.doc.clone();
         namespace_built_images(&mut doc, preview_id);
         if let Some(spec) = doc
@@ -74,7 +74,7 @@ impl Plan {
             spec.insert(
                 Value::String("ports".into()),
                 Value::Sequence(vec![Value::String(format!(
-                    "127.0.0.1:{host_port}:{}",
+                    "{publish}:{}",
                     self.container_port
                 ))]),
             );
@@ -329,6 +329,10 @@ mod tests {
 
     use super::*;
 
+    fn loopback(port: u16) -> std::net::SocketAddr {
+        (std::net::Ipv4Addr::LOCALHOST, port).into()
+    }
+
     /// The user's own `windows11`, trimmed — the file this has to get right.
     const REAL: &str = r#"
 services:
@@ -388,7 +392,7 @@ services:
         // gigabytes sat there — `image_disk_bytes` filters on Eren's label
         // and compose applies none. Reclaiming by that tag would have taken
         // the image their own `docker compose up` uses.
-        let out = plan(REAL).unwrap().render(&ID, 54321);
+        let out = plan(REAL).unwrap().render(&ID, loopback(54321));
         let doc: Value = serde_yaml::from_str(&out).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -427,7 +431,7 @@ services:
     build: .
     ports: ["3000:3000"]
 "#;
-        let out = plan(text).unwrap().render(&ID, 5000);
+        let out = plan(text).unwrap().render(&ID, loopback(5000));
         let doc: Value = serde_yaml::from_str(&out).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
 
@@ -458,7 +462,7 @@ services:
     fn a_service_that_both_builds_and_names_an_image_takes_our_name() {
         // The shape the user's own file has, and the one that used to collide.
         let text = "services:\n  api:\n    build: ./api\n    image: my-api:local\n";
-        let out = plan(text).unwrap().render(&ID, 5000);
+        let out = plan(text).unwrap().render(&ID, loopback(5000));
         assert!(out.contains("eren-preview-123456789abc-api"), "{out}");
         assert!(
             !out.contains("my-api:local"),
@@ -469,14 +473,14 @@ services:
     #[test]
     fn a_service_name_that_is_not_a_legal_tag_is_made_into_one() {
         let text = "services:\n  \"Web UI\":\n    build: .\n";
-        let out = plan(text).unwrap().render(&ID, 5000);
+        let out = plan(text).unwrap().render(&ID, loopback(5000));
         assert!(out.contains("eren-preview-123456789abc-web-ui"), "{out}");
     }
 
     #[test]
     fn renders_exactly_one_loopback_binding_back() {
         let p = plan(REAL).unwrap();
-        let out = p.render(&ID, 54321);
+        let out = p.render(&ID, loopback(54321));
         // One binding, on loopback, for the service we chose.
         assert!(out.contains("127.0.0.1:54321:80"), "{out}");
         assert_eq!(out.matches("127.0.0.1:").count(), 1, "{out}");

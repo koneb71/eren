@@ -458,7 +458,7 @@ async fn by_id(db: &Db, id: Uuid) -> anyhow::Result<Option<Preview>> {
             // A URL only while there is something on the other end of it.
             url: host_port
                 .filter(|_| status == "running")
-                .map(|p| format!("http://127.0.0.1:{p}")),
+                .map(|p| format!("http://{}", docker::published(p as u16))),
             host_port,
             container_port: r.get("container_port"),
             port_assumed: r.get("port_assumed"),
@@ -519,7 +519,7 @@ pub async fn list_for_project(db: &Db, project_id: Uuid) -> anyhow::Result<Vec<V
                     .unwrap_or_else(|| "main".to_string()),
                 "status": status,
                 "url": host_port.filter(|_| status == "running")
-                    .map(|p| format!("http://127.0.0.1:{p}")),
+                    .map(|p| format!("http://{}", docker::published(p as u16))),
                 "hostPort": host_port,
                 "containerPort": r.get::<Option<i32>, _>("container_port"),
                 "portAssumed": r.get::<bool, _>("port_assumed"),
@@ -997,7 +997,7 @@ async fn build_and_run(
     // its own services, so there is no single image and no `docker run`.
     if let How::Stack(plan, project_dir) = &build {
         let host_port = free_port().map_err(|e| format!("no free port: {e}"))?;
-        let rendered = compose_file_for(id, &plan.render(&id, host_port))
+        let rendered = compose_file_for(id, &plan.render(&id, docker::published(host_port)))
             .await
             .map_err(|e| format!("could not write the compose file: {e}"))?;
         // Recorded *before* the stack comes up, not after. A stack that fails

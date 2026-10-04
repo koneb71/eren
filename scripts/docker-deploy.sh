@@ -6,6 +6,7 @@
 #   ./scripts/docker-deploy.sh                  # pull neiellcare71/eren:latest and (re)start
 #   ./scripts/docker-deploy.sh --tag 1a2b3c4    # a specific build (roll back the same way)
 #   ./scripts/docker-deploy.sh --with-storage   # also object storage for KB attachments
+#   ./scripts/docker-deploy.sh --with-previews  # also the Docker socket, for previews (README first)
 #   ./scripts/docker-deploy.sh --down           # stop it (volumes, and your data, are kept)
 #
 # It needs only docker-compose.yml, .env and this script, laid out as in the
@@ -28,7 +29,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-    sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 fail() {
@@ -55,6 +56,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --tag) TAG="${2:?--tag needs a value}"; shift 2 ;;
         --with-storage) PROFILES+=(--profile storage); shift ;;
+        # The same as COMPOSE_FILE in .env, which compose reads by itself.
+        --with-previews) export COMPOSE_FILE=docker-compose.yml:docker-compose.previews.yml; shift ;;
         --down) DOWN=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) fail "unknown option: $1 (try --help)" ;;
@@ -64,6 +67,12 @@ done
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 docker compose version >/dev/null 2>&1 || fail "docker compose (v2) is not available"
 [ -f docker-compose.yml ] || fail "docker-compose.yml is not next to scripts/ ($(pwd))"
+case "${COMPOSE_FILE:-$(setting COMPOSE_FILE)}" in
+    *docker-compose.previews.yml*)
+        [ -f docker-compose.previews.yml ] ||
+            fail "COMPOSE_FILE asks for docker-compose.previews.yml, which is not next to docker-compose.yml"
+        ;;
+esac
 
 if [ "$DOWN" = 1 ]; then
     # Every profile, so a storage container started earlier stops too.

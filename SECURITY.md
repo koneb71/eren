@@ -121,6 +121,14 @@ publishes every port — Eren's, Postgres's and the object store's — on `127.0
 `127.0.0.1:`, leave the token on, or you are publishing an unauthenticated agent runner — and
 either way a database with a default password.
 
+`docker-compose.previews.yml` is the one Docker setting that widens what an agent can do, and
+it is opt-in for that reason: it mounts the host's Docker socket into Eren's container so
+previews and container apps work there, and whatever can use that socket is root on the host.
+Eren only builds and runs previews with it (each still without socket, mounts or privileges,
+published on loopback or, on Linux, the bridge gateway — never every interface), but agents in
+the container have a shell, so with it any agent run can reach the host. Without it, an agent
+is confined to the container and the mounted projects folder.
+
 The databases deserve that sentence. The compose Postgres defaults to a well-known password
 (`POSTGRES_PASSWORD` in `.env.example`), and the compose object store (RustFS, in the
 `storage` profile) to well-known root credentials

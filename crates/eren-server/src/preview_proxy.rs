@@ -210,7 +210,12 @@ async fn proxy(
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let url = format!("http://127.0.0.1:{port}{path}");
+    // Not always 127.0.0.1: a containerised Eren reaches the host's
+    // previews by name. See `previews::docker::dialled`.
+    let url = format!(
+        "http://{}{path}",
+        eren_core::previews::docker::dialled(port as u16)
+    );
     let method = req.method().clone();
     let headers = forwardable(req.headers());
 

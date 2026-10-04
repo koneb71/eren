@@ -1,0 +1,42 @@
+# Previews and container apps for Eren running in Docker.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.previews.yml --profile app up -d --build
+#
+# or put COMPOSE_FILE=docker-compose.yml:docker-compose.previews.yml in .env,
+# and every plain `docker compose` command (and scripts/docker-deploy.sh)
+# picks it up.
+#
+# Read "Previews in Docker" in README.md before using this. It hands the
+# container the host's Docker socket, and whatever can use that socket is root
+# on the host: it can start a privileged container with / mounted. Eren itself
+# only builds and runs previews with it, but the agents in this container have
+# a shell, so with this file any agent run can do the same. That is why it is
+# a separate file and not part of docker-compose.yml.
+#
+# The previews themselves still get no socket, no mount and no privileges —
+# see crates/eren-core/src/previews/docker.rs.
+
+services:
+  eren:
+    volumes:
+      # The daemon's socket. Docker Desktop and OrbStack understand this path
+      # even on a Mac, where no such file exists on the host.
+      - ${EREN_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    group_add:
+      # The socket's group, which the container user needs to talk to it.
+      # Docker Desktop and OrbStack hand it in as root:root 0660, hence 0. On
+      # a Linux host: EREN_DOCKER_GID=$(stat -c %g /var/run/docker.sock).
+      - "${EREN_DOCKER_GID:-0}"
+    extra_hosts:
+      # Defined already on Docker Desktop and OrbStack; on Linux, this is
+      # what makes the name resolve, to the bridge gateway.
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Docker publishes previews on the *host*, and the container's
+      # 127.0.0.1 is its own, so Eren dials the host by name.
+      EREN_PREVIEW_HOST: ${EREN_PREVIEW_HOST:-host.docker.internal}
+      # Where previews are published on the host. Loopback works on Docker
+      # Desktop and OrbStack. On Linux a port on the host's loopback is not
+      # reachable from a container, so set the bridge gateway (172.17.0.1
+      # unless your daemon says otherwise) — still not your network.
+      EREN_PREVIEW_PUBLISH_IP: ${EREN_PREVIEW_PUBLISH_IP:-127.0.0.1}

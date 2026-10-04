@@ -681,13 +681,8 @@ async fn docker_state() -> Value {
 }
 
 async fn docker_problem() -> Option<String> {
-    match eren_core::previews::docker::detect().await {
-        Some(Ok(_)) => None,
-        None => Some("Docker isn't installed, or isn't on this machine's PATH.".into()),
-        Some(Err(detail)) => Some(format!(
-            "Docker is installed but its daemon isn't responding. {detail}"
-        )),
-    }
+    use eren_core::previews::docker;
+    docker::explain(&docker::detect().await)
 }
 
 /// Whether this app's container is up, and where.

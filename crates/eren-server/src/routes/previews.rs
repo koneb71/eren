@@ -43,25 +43,23 @@ pub fn router() -> Router<AppState> {
 /// Docker Desktop gets started after Eren just as often as before it, and
 /// the point of showing this is to say "go and start it".
 async fn docker_status(_caller: Caller) -> Json<Value> {
-    match eren_core::previews::docker::detect().await {
-        None => Json(json!({
-            "installed": false,
-            "usable": false,
-            "problem": "Docker isn't installed, or isn't on this machine's PATH.",
-        })),
-        // Installed but not answering — a completely different fix from not
-        // having it, so it gets a different message.
-        Some(Err(problem)) => Json(json!({
-            "installed": true,
-            "usable": false,
-            "problem": format!("Docker is installed but its daemon isn't responding. {problem}"),
-        })),
-        Some(Ok(version)) => Json(json!({
+    use eren_core::previews::docker;
+    let detected = docker::detect().await;
+    // Not installed and installed-but-not-answering are completely different
+    // fixes, and so is either one inside a container; `explain` says which.
+    let problem = docker::explain(&detected);
+    Json(match detected {
+        Some(Ok(version)) => json!({
             "installed": true,
             "usable": true,
             "version": version,
-        })),
-    }
+        }),
+        other => json!({
+            "installed": other.is_some(),
+            "usable": false,
+            "problem": problem,
+        }),
+    })
 }
 
 /// What this preview printed while it was built, and since.
