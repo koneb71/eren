@@ -1495,7 +1495,12 @@ Three things the compose file handles that are easy to get wrong alone: your pro
 mounted at the **same absolute path** inside and out, because a git worktree records
 absolute paths and a repo mounted elsewhere has a broken worktree link; the container
 runs as your `UID`/`GID`, so files the agents write stay yours instead of root's; and
-Eren's state lives in a named volume, so a restart doesn't strand half-finished work.
+Eren's state lives in a named volume, so a restart doesn't strand half-finished work. The
+`claude` CLI's own folder, `~/.claude`, is a volume too (`eren-claude`): it holds the session
+every chat resumes, and without it each `up` that recreated the container broke every
+existing chat with "No conversation found". A chat that meets that anyway — its session
+deleted, or from before the volume existed — lets go of it and says so; the next message
+starts a fresh conversation.
 
 The app container's `DATABASE_URL` is built from the same `POSTGRES_*` defaults —
 `postgres://aichip:aichip@postgres:5432/aichip` — which Eren keeps for existing volumes, as

@@ -156,8 +156,15 @@ services:
       # /home/aichip/.aichip, to this one, so paths stored before the rename
       # still resolve.
       - aichip-state:/home/eren/.eren
+      # The Claude Code CLI's own folder: its session transcripts, which
+      # every chat resumes by id. Without a volume they went with the
+      # container, and every chat older than the last `up` failed with "No
+      # conversation found". Eren never reads it; the CLI does. Your login is
+      # not here — it is CLAUDE_CODE_OAUTH_TOKEN, in the environment.
+      - eren-claude:/home/eren/.claude
 
 volumes:
   aichip-pgdata:
   aichip-state:
   eren-objects:
+  eren-claude:

@@ -156,6 +156,17 @@ fn parse_user(v: &Value) -> Vec<ErenEvent> {
     events
 }
 
+/// What Claude Code says when asked to resume a session it does not have —
+/// one deleted, made under another home, or lost with a container that kept
+/// no `~/.claude`.
+const SESSION_NOT_FOUND: &str = "No conversation found with session ID";
+
+/// Did a run fail because the session it resumed no longer exists? So a
+/// caller holding that id can let go of it instead of failing on it forever.
+pub fn session_not_found(reason: &str) -> bool {
+    reason.contains(SESSION_NOT_FOUND)
+}
+
 fn parse_result(v: &Value) -> Vec<ErenEvent> {
     let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
     let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
@@ -164,12 +175,32 @@ fn parse_result(v: &Value) -> Vec<ErenEvent> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // A run that failed before the model said anything leaves `result` empty
+    // and puts why in `errors` — a missing session, a bad flag. Without this
+    // every one of them read as "error_during_execution" and nothing else.
+    let errors = v
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
 
     // The text is only a rate-limit signal when the run failed. On success it
     // is the model's last message — "returns 429 after five attempts" is a
     // summary of rate-limiting work, and reading it as a limit held a
     // finished run and ran it again, and again.
     let failed = is_error || subtype.starts_with("error");
+    let result_text = if failed && result_text.is_empty() {
+        errors
+    } else {
+        result_text
+    };
     if rate_limit_signal(subtype) || (failed && rate_limit_signal(&result_text)) {
         return vec![ErenEvent::RateLimited {
             reset_at: None,
@@ -334,6 +365,26 @@ mod tests {
         let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
         let events = parse_line(line);
         assert!(matches!(&events[..], [ErenEvent::RunFailed { reason }] if reason == "boom"));
+    }
+
+    #[test]
+    fn an_empty_error_result_says_what_its_errors_say() {
+        // Recorded from Claude Code 2.1.259, resuming a session it did not have.
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"result":"","session_id":"3f0c2a8e","errors":["No conversation found with session ID: 3f0c2a8e"]}"#;
+        let events = parse_line(line);
+        let [ErenEvent::RunFailed { reason }] = &events[..] else {
+            panic!("unexpected: {events:?}");
+        };
+        assert_eq!(reason, "No conversation found with session ID: 3f0c2a8e");
+        assert!(session_not_found(reason));
+        assert!(!session_not_found("boom"));
+
+        // Neither: the subtype is still better than nothing.
+        let bare = r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
+        assert!(matches!(
+            &parse_line(bare)[..],
+            [ErenEvent::RunFailed { reason }] if reason == "engine reported error (error_during_execution)"
+        ));
     }
 
     #[test]

@@ -3609,7 +3609,7 @@ project, or run this card on an engine with a narrower mode.",
             model_tier: tier,
             model_id,
             effort: chat_effort,
-            resume_session_id: session_id,
+            resume_session_id: session_id.clone(),
             permission_mode: chat_permission_mode(engine.as_ref()),
             // Both halves in plan mode. Dropping the four from `allowed` keeps
             // the assistant from reaching for them; adding them to `denied` is
@@ -3736,15 +3736,38 @@ project, or run this card on an engine with a narrower mode.",
             .execute(&self.db.pool)
             .await?;
         } else if outcome.status == RunStatus::Failed {
+            let reason = outcome.reason.clone().unwrap_or_default();
+            // The CLI no longer has the session this chat resumes — deleted, or
+            // gone with a container that kept no ~/.claude. Every later turn
+            // would fail the same way, so the chat lets go of it; and says so,
+            // because the next turn starts a conversation that has not heard
+            // the earlier ones, and quietly forgetting is the thing not to do.
+            let lost = session_id.is_some()
+                && eren_engines::claude::stream_parser::session_not_found(&reason);
+            if lost {
+                sqlx::query(
+                    "UPDATE chats SET session_id = NULL, session_engine = NULL, updated_at = now()
+                     WHERE id = $1 AND session_id = $2",
+                )
+                .bind(chat_id)
+                .bind(&session_id)
+                .execute(&self.db.pool)
+                .await?;
+            }
             sqlx::query(
                 "INSERT INTO chat_messages (chat_id, role, content, run_id)
                  VALUES ($1, 'system', $2, $3)",
             )
             .bind(chat_id)
-            .bind(format!(
-                "Assistant turn failed: {}",
-                outcome.reason.clone().unwrap_or_default()
-            ))
+            .bind(if lost {
+                format!(
+                    "Assistant turn failed: {engine_id} no longer has this conversation \
+                     ({reason}). Send your message again to start a new one — it will \
+                     not remember what was said above."
+                )
+            } else {
+                format!("Assistant turn failed: {reason}")
+            })
             .bind(run_id)
             .execute(&self.db.pool)
             .await?;

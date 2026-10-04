@@ -77,7 +77,11 @@ ARG UID=1000
 ARG GID=1000
 RUN groupadd -g "${GID}" eren 2>/dev/null || true \
     && useradd -m -u "${UID}" -g "${GID}" -s /bin/bash eren 2>/dev/null || true \
-    && install -d -o "${UID}" -g "${GID}" /home/eren/.eren
+    && install -d -o "${UID}" -g "${GID}" /home/eren/.eren /home/eren/.claude
+# ~/.claude is made here, owned by that user, because compose mounts a volume
+# on it and a volume takes the ownership of the directory it lands on — one
+# Docker had to create would be root's, and the CLI could not write to it.
+#
 # The project was called aichip, and its state volume was mounted at
 # /home/aichip/.aichip. The same volume is now mounted at ~/.eren, and paths
 # stored before the rename — worktrees in the database, git's own worktree
