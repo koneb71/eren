@@ -185,8 +185,20 @@ pub fn budget_scope(kind: &str, id: Uuid) -> Option<Owned> {
     }
 }
 
-/// Whether `user` owns the workspace `what` lives in.
+/// Whether `user` owns the workspace `what` lives in — or, for a personal
+/// skill, which lives in none, whether it is `user`'s.
 pub async fn owned_by(db: &Db, what: Owned, user: Uuid) -> anyhow::Result<bool> {
+    if let Owned::Skill(id) = what {
+        let personal: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT owner_id FROM skills WHERE id = $1 AND workspace_id IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&db.pool)
+        .await?;
+        if let Some(owner) = personal {
+            return Ok(owner == Some(user));
+        }
+    }
     let Some(ws) = workspace_of(db, what).await? else {
         return Ok(false);
     };

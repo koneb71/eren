@@ -159,6 +159,7 @@ mod tests {
             enabled: true,
             source_repo: None,
             source_project_id: None,
+            personal: false,
             updated_at: chrono::Utc::now(),
         }
     }

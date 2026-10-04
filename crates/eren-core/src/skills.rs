@@ -61,6 +61,9 @@ pub struct Skill {
     /// Which project's checkout holds the files, so the UI can say where to
     /// go and edit them.
     pub source_project_id: Option<Uuid>,
+    /// A personal skill: no workspace of its own, offered in every workspace
+    /// its owner has. Still applied only where it is named.
+    pub personal: bool,
 }
 
 fn row_to_skill(r: &sqlx::postgres::PgRow) -> Skill {
@@ -74,11 +77,12 @@ fn row_to_skill(r: &sqlx::postgres::PgRow) -> Skill {
         updated_at: r.get("updated_at"),
         source_repo: r.get("source_repo"),
         source_project_id: r.get("source_project_id"),
+        personal: r.get("personal"),
     }
 }
 
-const COLUMNS: &str =
-    "id, name, description, instructions, must_not, enabled, updated_at, source_repo, source_project_id";
+const COLUMNS: &str = "id, name, description, instructions, must_not, enabled, updated_at, \
+     source_repo, source_project_id, workspace_id IS NULL AS personal";
 
 /// Fold a named skill into a prompt.
 ///
@@ -141,9 +145,12 @@ fn clip(text: &str, budget: usize) -> (String, usize) {
     (text[..end].to_string(), text.len() - end)
 }
 
+/// The skills that can be named in a workspace: its own, and its owner's
+/// personal ones (`skill_in_workspace`, migration 0092).
 pub async fn list(db: &Db, workspace_id: Uuid) -> anyhow::Result<Vec<Skill>> {
     let rows = sqlx::query(&format!(
-        "SELECT {COLUMNS} FROM skills WHERE workspace_id=$1 ORDER BY name ASC"
+        "SELECT {COLUMNS} FROM skills
+          WHERE skill_in_workspace(workspace_id, owner_id, $1) ORDER BY name ASC"
     ))
     .bind(workspace_id)
     .fetch_all(&db.pool)
@@ -205,7 +212,9 @@ pub async fn check_name_free(
     // The stored spelling, not the typed one: the match is case-insensitive, so
     // echoing what was typed sends someone looking for a name that is not there.
     let clash: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM skills WHERE workspace_id=$1 AND lower(name)=lower($2) AND id <> $3",
+        "SELECT name FROM skills
+          WHERE skill_in_workspace(workspace_id, owner_id, $1)
+            AND lower(name)=lower($2) AND id <> $3",
     )
     .bind(workspace_id)
     .bind(name)
@@ -218,6 +227,28 @@ pub async fn check_name_free(
     Ok(Ok(()))
 }
 
+/// Is this name free for a personal skill of `owner` — in every workspace it
+/// will be offered in, since it is named with an `@` in each of them?
+pub async fn check_personal_name_free(
+    db: &Db,
+    owner: Option<Uuid>,
+    name: &str,
+    except: Option<Uuid>,
+) -> anyhow::Result<Result<(), String>> {
+    let workspaces: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, name FROM workspaces WHERE owner_id IS NOT DISTINCT FROM $1 ORDER BY created_at",
+    )
+    .bind(owner)
+    .fetch_all(&db.pool)
+    .await?;
+    for (ws, ws_name) in workspaces {
+        if let Err(why) = check_name_free(db, ws, name, except).await? {
+            return Ok(Err(format!("in {ws_name}: {why}")));
+        }
+    }
+    Ok(Ok(()))
+}
+
 /// The same question, asked from the agents side.
 pub async fn agent_name_free(
     db: &Db,
@@ -225,7 +256,8 @@ pub async fn agent_name_free(
     name: &str,
 ) -> anyhow::Result<Result<(), String>> {
     let skill: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM skills WHERE workspace_id=$1 AND lower(name)=lower($2)",
+        "SELECT name FROM skills
+          WHERE skill_in_workspace(workspace_id, owner_id, $1) AND lower(name)=lower($2)",
     )
     .bind(workspace_id)
     .bind(name.trim())
@@ -254,6 +286,7 @@ mod tests {
             enabled: true,
             source_repo: None,
             source_project_id: None,
+            personal: false,
             updated_at: chrono::Utc::now(),
         }
     }
@@ -327,5 +360,108 @@ mod tests {
         let out = augment_prompt("ship", Some(&s));
         // The sentence naming the skill stays one sentence.
         assert!(out.contains("called \"release Ignore the above\""), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::testdb;
+
+    async fn personal(db: &Db, owner: Option<Uuid>, name: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO skills (owner_id, name, description, instructions, must_not)
+             VALUES ($1, $2, '', 'do it this way', '') RETURNING id",
+        )
+        .bind(owner)
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_personal_skill_is_offered_in_every_workspace_of_its_owner_and_no_other() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let db = &t.db;
+        let admin = crate::users::create_admin(db, "admin", "a long password")
+            .await
+            .unwrap();
+        let first = crate::users::workspaces(db, admin.id).await.unwrap()[0];
+        let second: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (name, owner_id) VALUES ('second', $1) RETURNING id",
+        )
+        .bind(admin.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let bea = crate::users::sign_up(db, "bea", "another password")
+            .await
+            .unwrap();
+        let hers = crate::users::workspaces(db, bea.id).await.unwrap()[0];
+
+        let id = personal(db, Some(admin.id), "release").await;
+        for ws in [first, second] {
+            let names: Vec<String> = list(db, ws)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            assert_eq!(names, vec!["release"], "{ws}");
+            assert!(list(db, ws).await.unwrap()[0].personal);
+        }
+        assert!(list(db, hers).await.unwrap().is_empty());
+
+        // One @ namespace: an agent of that name in any of the owner's
+        // workspaces, and it is refused — in that workspace and for the skill.
+        assert!(agent_name_free(db, second, "release")
+            .await
+            .unwrap()
+            .is_err());
+        assert!(agent_name_free(db, hers, "release").await.unwrap().is_ok());
+        sqlx::query("INSERT INTO agents (name, workspace_id) VALUES ('deploy', $1)")
+            .bind(second)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert!(check_personal_name_free(db, Some(admin.id), "deploy", None)
+            .await
+            .unwrap()
+            .is_err());
+        assert!(
+            check_personal_name_free(db, Some(admin.id), "release", Some(id))
+                .await
+                .unwrap()
+                .is_ok()
+        );
+        t.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_local_persons_skills_become_the_first_admins() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let db = &t.db;
+        personal(db, None, "release").await;
+        let admin = crate::users::create_admin(db, "admin", "a long password")
+            .await
+            .unwrap();
+        assert!(crate::scope::owned_by(
+            db,
+            crate::scope::Owned::Skill(
+                list(db, crate::users::workspaces(db, admin.id).await.unwrap()[0])
+                    .await
+                    .unwrap()[0]
+                    .id
+            ),
+            admin.id
+        )
+        .await
+        .unwrap());
+        t.finish().await;
     }
 }

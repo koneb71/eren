@@ -25,6 +25,7 @@ pub mod research;
 pub mod reviews;
 pub mod revisions;
 pub mod routines;
+pub mod rules;
 pub mod search;
 pub mod settings;
 pub mod skills;
@@ -155,6 +156,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(research::router())
         .merge(manager::router())
         .merge(routines::router())
+        .merge(rules::router())
         .merge(spaces::router())
 }
 

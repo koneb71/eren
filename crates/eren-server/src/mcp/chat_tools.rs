@@ -905,7 +905,9 @@ async fn resolve_skill(
         // Matched without regard to case, like agents; a disabled skill is
         // as good as absent.
         let found: Option<(Uuid, String)> = sqlx::query_as(
-            "SELECT id, name FROM skills WHERE workspace_id=$1 AND lower(name)=lower($2) AND enabled",
+            "SELECT id, name FROM skills
+              WHERE skill_in_workspace(workspace_id, owner_id, $1)
+                AND lower(name)=lower($2) AND enabled",
         )
         .bind(workspace_id)
         .bind(name)

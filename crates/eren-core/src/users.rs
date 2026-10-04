@@ -223,6 +223,9 @@ pub async fn create_admin(db: &Db, username: &str, password: &str) -> Result<Use
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
+    // And what that person carried between projects: their rules and their
+    // personal skills.
+    crate::rules::adopt_local(&mut tx, user.id).await?;
     // A database with no workspace at all (one somebody emptied) still
     // leaves the admin somewhere to land.
     ensure_workspace(&mut tx, user.id).await?;

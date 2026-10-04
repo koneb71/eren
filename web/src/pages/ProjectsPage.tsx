@@ -7,6 +7,7 @@ import { CloneRepoModal } from "../components/CloneRepoModal";
 import { Card, Empty, gradientFor, Item, Page, PageHead, Stagger } from "../components/ui/Surface";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
+import { toast } from "../components/ui/Toast";
 
 export default function ProjectsPage() {
   const { active } = useWorkspace();
@@ -101,6 +102,15 @@ export default function ProjectsPage() {
           onPick={async (path) => {
             const added = await api.addProject(active.id, path);
             refresh();
+            if (added.rules?.written.length) {
+              toast("Your rules were added", {
+                tone: "success",
+                body: `${added.rules.written.join(" and ")} committed to the new project.`,
+              });
+            }
+            if (added.rules?.skipped) {
+              toast("Your rules were not all added", { tone: "warning", body: added.rules.skipped });
+            }
             return { vcs: added.vcs, vcsNote: added.vcsNote };
           }}
         />

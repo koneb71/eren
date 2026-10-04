@@ -296,10 +296,13 @@ pub async fn resolve_all(
     // Disabled skills are not offered and do not resolve: a mention of one is
     // the same as a mention of something that is not there, which is what "off"
     // has to mean for turning it off to be a diagnosis.
-    let skills = sqlx::query("SELECT id, name FROM skills WHERE workspace_id=$1 AND enabled")
-        .bind(workspace_id)
-        .fetch_all(&db.pool)
-        .await?;
+    let skills = sqlx::query(
+        "SELECT id, name FROM skills
+          WHERE skill_in_workspace(workspace_id, owner_id, $1) AND enabled",
+    )
+    .bind(workspace_id)
+    .fetch_all(&db.pool)
+    .await?;
 
     let names: Vec<String> = agents
         .iter()

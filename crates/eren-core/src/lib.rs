@@ -33,6 +33,7 @@ pub mod repo;
 pub mod review;
 pub mod revisions;
 pub mod routines;
+pub mod rules;
 pub mod runs;
 pub mod scheduler;
 pub mod scope;

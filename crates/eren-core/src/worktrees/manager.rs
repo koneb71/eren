@@ -1289,7 +1289,7 @@ pub async fn stash(repo: &Path, message: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) async fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
     let out = env_guard::command("git")
         .current_dir(cwd)
         .args(args)

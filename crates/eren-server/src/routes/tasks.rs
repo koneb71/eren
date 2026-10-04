@@ -1152,7 +1152,7 @@ pub(crate) async fn move_task(
         require_same_workspace(&state, id, "teams", team_id).await?;
     }
     if let Some(Some(skill_id)) = body.skill_id {
-        require_same_workspace(&state, id, "skills", skill_id).await?;
+        require_skill_for_card(&state, id, skill_id).await?;
     }
     if let Some(Some(goal)) = body.goal_id {
         super::goals::vet_card_goal(&state, id, goal).await?;
@@ -1278,6 +1278,29 @@ async fn require_same_workspace(
             "that {} is not in this card's workspace",
             table.trim_end_matches('s')
         ),
+    ))
+}
+
+/// A skill a card may use: one its workspace can name — its own, or a
+/// personal skill of the workspace's owner (`skill_in_workspace`).
+async fn require_skill_for_card(
+    state: &AppState,
+    task_id: Uuid,
+    skill_id: Uuid,
+) -> Result<(), ApiError> {
+    let ok: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM skills s, tasks t JOIN projects p ON p.id = t.project_id
+          WHERE t.id = $1 AND s.id = $2
+            AND skill_in_workspace(s.workspace_id, s.owner_id, p.workspace_id)",
+    )
+    .bind(task_id)
+    .bind(skill_id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(internal)?;
+    ok.map(|_| ()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "that skill is not in this card's workspace".into(),
     ))
 }
 

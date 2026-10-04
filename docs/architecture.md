@@ -1297,3 +1297,4 @@ One row per file in `crates/eren-core/migrations/`. The number is the filename's
 | `0089` | Accounts: `users` (one admin), `sessions`, `workspaces.owner_id`, the `user` audit actor. |
 | `0090` | `attachments.workspace_id`: a general chat's uploads belong to its workspace (exactly one of project or workspace). |
 | `0091` | `chats.agent_id`: a conversation with one of the workspace's agents — its persona, memories, engine, tier and effort; the run carries the agent, so its gate, limits and budgets apply. |
+| `0092` | Personal rules (`users.rules`, written into each new repository project as AGENTS.md + CLAUDE.md) and personal skills (`skills.workspace_id` NULL, `owner_id`; `skill_in_workspace`). |

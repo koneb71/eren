@@ -4,6 +4,7 @@ import { EffortPicker } from "../components/EffortPicker";
 import { PreviewSettings } from "../components/PreviewSettings";
 import { AttentionSettings } from "../components/AttentionSettings";
 import { UnattendedSettings } from "../components/UnattendedSettings";
+import { RulesSettings } from "../components/RulesSettings";
 import { Page, PageHead } from "../components/ui/Surface";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
@@ -139,6 +140,8 @@ export default function SettingsPage() {
         title="Settings"
         subtitle="Which model runs at each complexity tier. Tasks, agents and workflow steps all pick a tier — this is what those tiers mean."
       />
+
+      <RulesSettings />
 
       <h2 className="mt-7 text-sm font-semibold uppercase tracking-wider text-fg-muted">
         Permissions

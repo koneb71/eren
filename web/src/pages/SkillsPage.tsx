@@ -31,12 +31,13 @@ export default function SkillsPage() {
   }, [active]);
   useEffect(load, [load]);
 
-  const add = async () => {
+  const add = async (personal = false) => {
     if (!active) return;
     setError(null);
     try {
       const s = await api.createSkill({
         workspace_id: active.id,
+        personal,
         name: `new-skill-${skills.length + 1}`,
         description: "",
         instructions: "",
@@ -68,9 +69,17 @@ export default function SkillsPage() {
             Add from a registry
           </Button>
           <Button
+            variant="secondary"
+            size="md"
+            onClick={() => void add(true)}
+            title="A skill of your own, offered in every workspace you have"
+          >
+            New personal skill
+          </Button>
+          <Button
             variant="primary"
             size="md"
-            onClick={add}
+            onClick={() => void add()}
             icon={<Icon name="plus" size={15} strokeWidth={2.5} />}
           >
             New skill
@@ -100,6 +109,14 @@ export default function SkillsPage() {
                   {!s.enabled && (
                     <span className="shrink-0 rounded-full bg-panel-2 px-2 py-0.5 text-[10px] text-fg-muted">
                       off
+                    </span>
+                  )}
+                  {s.personal && (
+                    <span
+                      className="shrink-0 rounded-full bg-accent-subtle px-2 py-0.5 text-[10px] text-accent-fg"
+                      title="Yours: offered in every workspace you have"
+                    >
+                      personal
                     </span>
                   )}
                 </div>

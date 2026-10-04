@@ -49,6 +49,10 @@ async fn list(
 #[derive(Deserialize)]
 pub(crate) struct SkillBody {
     workspace_id: Option<Uuid>,
+    /// Create it as a personal skill — the caller's, offered in every one of
+    /// their workspaces — rather than one of `workspace_id`'s. Read only on
+    /// create; where a skill lives does not change afterwards.
+    personal: Option<bool>,
     name: Option<String>,
     description: Option<String>,
     instructions: Option<String>,
@@ -75,30 +79,44 @@ async fn create(
     caller: Caller,
     Json(body): Json<SkillBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace_id = body.workspace_id.ok_or((
-        StatusCode::BAD_REQUEST,
-        "workspace_id is required".to_string(),
-    ))?;
-    caller
-        .require(&state, Owned::Workspace(workspace_id))
-        .await?;
+    let personal = body.personal.unwrap_or(false);
+    let workspace_id = match (personal, body.workspace_id) {
+        (true, _) => None,
+        (false, Some(ws)) => {
+            caller.require(&state, Owned::Workspace(ws)).await?;
+            Some(ws)
+        }
+        (false, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "workspace_id is required".to_string(),
+            ))
+        }
+    };
     let name = body.name.as_deref().unwrap_or("").trim().to_string();
     no_secrets(&body)?;
 
     // One `@` namespace with agents, so this refusal has to name the reason —
     // "that already exists" would leave somebody hunting through the wrong list.
-    if let Err(why) = eren_core::skills::check_name_free(&state.db, workspace_id, &name, None)
-        .await
-        .map_err(internal)?
-    {
+    // A personal skill is named in every workspace its owner has, so it has
+    // to be free in each.
+    let free = match workspace_id {
+        Some(ws) => eren_core::skills::check_name_free(&state.db, ws, &name, None).await,
+        None => {
+            eren_core::skills::check_personal_name_free(&state.db, caller.user_id(), &name, None)
+                .await
+        }
+    };
+    if let Err(why) = free.map_err(internal)? {
         return Err((StatusCode::CONFLICT, why));
     }
 
     let row = sqlx::query(
-        "INSERT INTO skills (workspace_id, name, description, instructions, must_not, enabled)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        "INSERT INTO skills (workspace_id, owner_id, name, description, instructions, must_not, enabled)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
     )
     .bind(workspace_id)
+    .bind(if personal { caller.user_id() } else { None })
     .bind(&name)
     .bind(body.description.as_deref().unwrap_or(""))
     .bind(body.instructions.as_deref().unwrap_or(""))
@@ -122,17 +140,20 @@ pub(crate) async fn update(
     no_secrets(&body)?;
 
     if let Some(name) = body.name.as_deref().map(str::trim) {
-        let workspace_id: Uuid = sqlx::query_scalar("SELECT workspace_id FROM skills WHERE id=$1")
-            .bind(id)
-            .fetch_optional(&state.db.pool)
-            .await
-            .map_err(internal)?
-            .ok_or((StatusCode::NOT_FOUND, "no such skill".to_string()))?;
-        if let Err(why) =
-            eren_core::skills::check_name_free(&state.db, workspace_id, name, Some(id))
+        let (workspace_id, owner): (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT workspace_id, owner_id FROM skills WHERE id=$1")
+                .bind(id)
+                .fetch_optional(&state.db.pool)
                 .await
                 .map_err(internal)?
-        {
+                .ok_or((StatusCode::NOT_FOUND, "no such skill".to_string()))?;
+        let free = match workspace_id {
+            Some(ws) => eren_core::skills::check_name_free(&state.db, ws, name, Some(id)).await,
+            None => {
+                eren_core::skills::check_personal_name_free(&state.db, owner, name, Some(id)).await
+            }
+        };
+        if let Err(why) = free.map_err(internal)? {
             return Err((StatusCode::CONFLICT, why));
         }
     }

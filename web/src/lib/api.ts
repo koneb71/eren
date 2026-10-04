@@ -81,6 +81,14 @@ export interface Skill {
   sourceRepo: string | null;
   /** Whose checkout holds the files, so the UI can say where to edit them. */
   sourceProjectId: string | null;
+  /** Yours rather than this workspace's: offered in every workspace you have. */
+  personal: boolean;
+}
+
+/** What adding a project did with your rules: files written and committed, or why not. */
+export interface RulesSeeded {
+  written: string[];
+  skipped: string | null;
 }
 
 /** What one registry install produced. */
@@ -2104,8 +2112,12 @@ export const api = {
   // Initializes a repository server-side when the folder needs one.
   addProject: (workspaceId: string, path: string) =>
     post("/api/projects", { workspace_id: workspaceId, path }).then((r) =>
-      json<{ id: string; name: string; vcs: "git" | "none"; vcsNote: string | null }>(r),
+      json<{ id: string; name: string; vcs: "git" | "none"; vcsNote: string | null; rules: RulesSeeded | null }>(r),
     ),
+
+  // your rules, written into each new repository project
+  rules: () => fetch("/api/rules").then((r) => json<{ text: string; maxChars: number }>(r)),
+  saveRules: (text: string) => guarded("PUT", "/api/rules", { text }).then(json),
 
   // fs browser
   fsList: (path?: string) =>
@@ -2182,6 +2194,8 @@ export const api = {
     ),
   createSkill: (body: {
     workspace_id: string;
+    /** Yours, in every workspace you have, rather than only this one's. */
+    personal?: boolean;
     name: string;
     description?: string;
     instructions?: string;

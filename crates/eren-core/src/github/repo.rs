@@ -493,12 +493,12 @@ async fn settle(db: &Db, done: Cloning) -> CloneProgress {
     // write a commit into a fresh clone. A clone already knows it is a git
     // repository and has the real default branch from `gh` — better
     // information than that function could produce.
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = sqlx::query_as::<_, (Uuid, bool)>(
         "INSERT INTO projects (path, name, default_branch, workspace_id, vcs, github_repo)
          VALUES ($1, $2, $3, $4, 'git', $5)
          ON CONFLICT (path) DO UPDATE
             SET name = EXCLUDED.name, github_repo = EXCLUDED.github_repo
-         RETURNING id",
+         RETURNING id, (xmax = 0) AS fresh",
     )
     .bind(&path)
     .bind(&name)
@@ -509,13 +509,24 @@ async fn settle(db: &Db, done: Cloning) -> CloneProgress {
     .await;
 
     match inserted {
-        Ok(project_id) => CloneProgress::Done {
-            project_id,
-            path,
-            name,
-            github_repo: done.facts.slug,
-            default_branch: done.facts.default_branch,
-        },
+        Ok((project_id, fresh)) => {
+            // The owner's rules, into a project that is new — once, on the
+            // poll that created the row, not on every poll that sees the exit.
+            if fresh {
+                let seeded =
+                    crate::rules::seed_project(db, done.workspace_id, &done.destination).await;
+                if !seeded.written.is_empty() || seeded.skipped.is_some() {
+                    tracing::info!(path = %path, written = ?seeded.written, skipped = ?seeded.skipped, "rules for the new project");
+                }
+            }
+            CloneProgress::Done {
+                project_id,
+                path,
+                name,
+                github_repo: done.facts.slug,
+                default_branch: done.facts.default_branch,
+            }
+        }
         Err(e) => CloneProgress::Failed {
             // The folder is left alone: it is a complete clone, and the person
             // can add it by hand. Deleting somebody's freshly cloned code

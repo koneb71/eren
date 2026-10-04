@@ -844,7 +844,7 @@ async fn create(
              workspace_id = EXCLUDED.workspace_id,
              vcs = EXCLUDED.vcs, vcs_note = EXCLUDED.vcs_note
          WHERE $7::uuid[] IS NULL OR projects.workspace_id = ANY($7)
-         RETURNING id",
+         RETURNING id, (xmax = 0) AS fresh",
     )
     .bind(body.workspace_id)
     .bind(&body.path)
@@ -857,11 +857,20 @@ async fn create(
     .await
     .map_err(internal)?
     .ok_or_else(taken_elsewhere)?;
+    // A repository that just became a project starts with its owner's rules
+    // (`eren_core::rules`). Not one being loaded again, and not a folder with
+    // no repository, where a commit is not possible.
+    let rules = if row.get::<bool, _>("fresh") && vcs == "git" {
+        Some(eren_core::rules::seed_project(&state.db, body.workspace_id, path).await)
+    } else {
+        None
+    };
     Ok(Json(json!({
         "id": row.get::<Uuid, _>("id"),
         "name": name,
         "vcs": vcs,
         "vcsNote": vcs_note,
+        "rules": rules,
     })))
 }
 

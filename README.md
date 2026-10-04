@@ -872,6 +872,24 @@ same treatment: framed as background rather than orders, unable to close their o
 and capped so neither can bury the actual task. Text that looks like a credential is
 refused on save.
 
+#### Your rules and personal skills
+
+Two things that follow *you* rather than a project — yours alone once [accounts](#accounts)
+are on, the one local person's before that.
+
+- **Your rules** (Settings → Your rules) are how you want agents to work, written once. Every
+  new repository project, added or cloned, starts with them as `AGENTS.md` — the file Codex,
+  OpenCode, Cursor and Amp read — plus a one-line `CLAUDE.md` (`@AGENTS.md`) so Claude Code
+  reads the same text. Both are committed (only those two files, whatever else is staged),
+  because an agent's worktree is cut from the branch and would not see a file that is only in
+  the checkout. From then on they are the repository's files: edit them there; changing your
+  rules changes projects made later. A repository that already has an `AGENTS.md` is left
+  alone. In a clone of someone else's repository the commit is on your local branch, so a pull
+  request from a card there includes it — delete the files first if that is not wanted.
+- **A personal skill** (Skills → New personal skill) is offered in every workspace you have —
+  the Skills page, the card picker and `@` in chat — instead of one. It still applies only where
+  you name it, and its name must be free in each of your workspaces.
+
 #### Installing a skill from a registry
 
 Eren can install Agent Skills into a project: `npx skills add owner/repo` is run in the
