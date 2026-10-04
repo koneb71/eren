@@ -1583,8 +1583,8 @@ a foreign architecture is compiled under emulation and takes much longer. The im
 uid/gid 1000; `--uid`/`--gid` change it for a server where your user is someone else. It never
 logs in for you, and `.env` never reaches the build.
 
-`docker-deploy.sh` needs only `docker-compose.yml`, `.env` and itself, laid out as in the
-repository. It reads `EREN_IMAGE` and `EREN_TAG` (default `latest`) from `.env`, pulls,
+`docker-deploy.sh` needs only `docker-compose.yml`, `.env`, itself and `docker-backup.sh`,
+laid out as in the repository. It reads `EREN_IMAGE` and `EREN_TAG` (default `latest`) from `.env`, pulls,
 and starts Postgres and Eren with `--no-build`, so it never falls back to building from
 source; it warns when `CLAUDE_CODE_OAUTH_TOKEN` or `EREN_PROJECTS_DIR` is missing.
 `--tag <hash>` deploys (or rolls back to) one build, `--with-storage` adds object storage,
@@ -1593,6 +1593,58 @@ source; it warns when `CLAUDE_CODE_OAUTH_TOKEN` or `EREN_PROJECTS_DIR` is missin
 `DOCKER_HOST=ssh://you@server ./scripts/docker-deploy.sh` — `.env` is then read locally and
 `EREN_PROJECTS_DIR` names a path on the server. Everything above about the token, ports and
 mounts applies unchanged: it is the same compose service, pulled instead of built.
+
+### Keeping your data across redeploys
+
+Everything you would miss lives in three named volumes and one folder of your own:
+
+| Where | What |
+|---|---|
+| the Postgres volume | projects, chats and every message, cards, agents, settings |
+| the state volume (`~/.eren` in the container) | worktrees with agents' work in progress, attachments, apps, spaces |
+| `eren-claude` (`~/.claude` in the container) | the Claude Code sessions each chat resumes |
+| `EREN_PROJECTS_DIR`, bind-mounted | your code itself — on the host, never in a volume |
+
+`up -d --build`, a new image, a restart and a plain `down` all keep them. What does not:
+
+- **`docker compose down -v`**, `docker volume rm`, `docker volume prune -a` and
+  `docker system prune --volumes` delete volumes, and the data in them. Never use them on
+  Eren's.
+- **A different compose project name.** Compose names volumes `<project>_<volume>`, and the
+  project is the folder's name unless `COMPOSE_PROJECT_NAME` says otherwise. Deploy from a copy
+  in another folder and Eren starts on new, empty volumes — the data is still there, beside
+  them, looking lost. Set `COMPOSE_PROJECT_NAME` in `.env` to pin it.
+- **A different `EREN_PROJECTS_DIR`.** The path is stored with every project and worktree, and
+  in git's own worktree links. Move the folder and keep the path, or keep the setting.
+- Anything written elsewhere in the container — a `git config --global`, a `gh auth login` in
+  the terminal — is in its throwaway layer. The image sets a git identity (`eren`) so landing a
+  card commits without one; a repository's own `git config user.name` still wins and is kept in
+  the repository.
+
+`docker-deploy.sh` holds the line on the middle two and takes a backup before every deploy:
+it refuses (and changes nothing) when this deploy would start on empty volumes while yours
+exist under another project name, or when `EREN_PROJECTS_DIR` differs from what the running
+container has, saying which setting brings it back — `--force` when the change is intended.
+
+Backups are `scripts/docker-backup.sh`, run by the deploy script first (`--no-backup` to skip),
+or by you at any time. Each is a folder under `backups/` (`EREN_BACKUP_DIR`) on the machine
+running the script — with `DOCKER_HOST=ssh://…`, your machine and not the server — holding a
+`pg_dump` of the database and the state and session volumes as tarballs (the re-downloadable
+model cache left out); the newest `EREN_BACKUP_KEEP`, 10 by default, are kept. It finds the
+volumes from the running containers, so it backs up whatever is actually mounted. Backups hold
+the database — settings, check commands, every conversation — so `backups/` is gitignored and
+readable by you alone.
+
+To put one back:
+
+```bash
+./scripts/docker-restore.sh backups/20261005-101500-pre-deploy --yes
+```
+
+It replaces the database, `~/.eren` and `~/.claude` with the backup's, exactly: the database is
+dropped and replayed in one transaction, so a restore that fails leaves it as it was. Before
+that it backs up the current state (`…-pre-restore`), and it refuses a folder without the
+`COMPLETE` marker a finished backup writes. On a new machine, deploy first, then restore.
 
 ## Development
 

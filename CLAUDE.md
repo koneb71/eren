@@ -67,7 +67,9 @@ cd web && pnpm exec tsc -b           # types, as CI runs them
 cd web && pnpm build                 # tsc -b && vite build → web/dist (what the server serves)
 
 ./scripts/docker-publish.sh          # build the image with buildx and push it to neiellcare71/eren (--platform, --tag, --no-push)
-./scripts/docker-deploy.sh           # pull it and run it with Postgres via compose (EREN_IMAGE, --tag, --down)
+./scripts/docker-deploy.sh           # back up, check, pull and run it with Postgres via compose (EREN_IMAGE, --tag, --down, --force)
+./scripts/docker-backup.sh           # pg_dump + the state and ~/.claude volumes into backups/ (run before every deploy)
+./scripts/docker-restore.sh <dir> --yes   # put a backup back, after backing up the current state
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `cargo fmt --all -- --check`, clippy (advisory, not blocking yet), `cargo test --workspace` against a Postgres service, and `pnpm exec tsc -b`, `pnpm test`, `pnpm build`.

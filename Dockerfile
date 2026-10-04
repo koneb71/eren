@@ -71,6 +71,15 @@ RUN apt-get update \
     && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
+# Who commits. Landing a card squash-merges and commits in your repository,
+# and that commit takes git's configured identity; a container has none, so
+# git refused ("Author identity unknown") — and one set by hand in the
+# terminal lived in the container's home and went with the next redeploy.
+# A system default, the same identity Eren's own commits name: a repository's
+# own `git config user.name/user.email`, kept in its .git/config, still wins.
+RUN git config --system user.name eren \
+    && git config --system user.email eren@localhost
+
 # Runs as a normal user: an agent with a shell should not be uid 0, and the
 # uid is overridable so files it writes into your mounted code stay yours.
 ARG UID=1000

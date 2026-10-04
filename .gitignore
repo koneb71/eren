@@ -6,3 +6,6 @@ web/dist/
 *.log
 .env
 .eren-local/
+
+# Database dumps and volume tarballs from scripts/docker-backup.sh.
+backups/

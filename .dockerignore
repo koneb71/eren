@@ -14,3 +14,6 @@ node_modules/
 .DS_Store
 .github/
 .claude/
+
+# Backups hold the database; never in the build context, never in a layer.
+backups/

@@ -31,6 +31,10 @@
 # volume, or at a role that does not exist. They are names, not branding,
 # and nothing outside this file shows them.
 #
+# Your data is in the volumes at the bottom: `down` keeps them, `down -v`
+# deletes them. scripts/docker-deploy.sh backs them up before every deploy
+# — see "Keeping your data across redeploys" in README.md.
+#
 # Variables you set in `.env` are read as EREN_* first and AICHIP_* second,
 # so an `.env` written before the rename keeps working.
 
