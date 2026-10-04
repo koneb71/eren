@@ -5,6 +5,7 @@ import { Card, Empty, Item, Page, PageHead, Stagger, TintIcon } from "../compone
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
+import { GenerateSkillsWizard } from "../components/GenerateSkillsWizard";
 
 /**
  * Skills: a named way of doing something, smaller than an agent.
@@ -24,6 +25,7 @@ export default function SkillsPage() {
   const [editing, setEditing] = useState<Skill | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [generating, setGenerating] = useState(false);
 
   const load = useCallback(() => {
     if (!active) return;
@@ -65,6 +67,9 @@ export default function SkillsPage() {
         }
         actions={
           <div className="flex shrink-0 items-center gap-2">
+          <Button variant="secondary" size="md" onClick={() => setGenerating(true)}>
+            Generate with AI
+          </Button>
           <Button variant="secondary" size="md" onClick={() => setInstalling(true)}>
             Add from a registry
           </Button>
@@ -147,6 +152,10 @@ export default function SkillsPage() {
           </div>
         )}
       </Stagger>
+
+      {generating && active && (
+        <GenerateSkillsWizard workspaceId={active.id} onClose={() => setGenerating(false)} onSaved={load} />
+      )}
 
       {installing && active && (
         <InstallFromRegistry

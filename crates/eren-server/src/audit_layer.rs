@@ -39,6 +39,10 @@ pub const QUIET: &[(&str, &str)] = &[
         "drafts an app for the person to edit; saves nothing",
     ),
     (
+        "/skills/generate",
+        "drafts skills for the person to edit; saves nothing",
+    ),
+    (
         "/skills/{id}/try",
         "runs a skill against sample text; saves nothing",
     ),

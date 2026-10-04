@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use eren_core::runs::utility::utility_run;
+use eren_core::runs::utility::{extract_json, utility_run};
 use eren_core::scope::Owned;
 use eren_shared::{ModelTier, ReasoningEffort};
 use serde::Deserialize;
@@ -19,6 +19,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/skills", get(list).post(create))
+        .route("/skills/generate", post(generate))
         .route("/skills/{id}", patch(update).delete(remove))
         .route("/skills/{id}/try", post(try_it))
         // Installing is project-shaped even though the library is
@@ -204,6 +205,74 @@ async fn remove(
         .await
         .map_err(internal)?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+#[derive(Deserialize)]
+struct GenerateBody {
+    /// What kind of job the skills are for.
+    description: String,
+    /// Engine id from `/api/engines`. Omitted means the machine default.
+    engine: Option<String>,
+    /// Which tier writes them; resolves through the person's own settings.
+    model_tier: Option<ModelTier>,
+}
+
+const GENERATE_PROMPT: &str = r##"You are writing skills for a multi-agent coding platform.
+A skill is a named, reusable method for ONE particular kind of job — how that job is done here,
+like "how we write a database migration" or "our release checklist". It is applied only when a
+person names it (@its-name), so it must be narrow: never general coding advice.
+
+Based on the user's need below, output ONLY a JSON array of 1 to 3 skill definitions — no prose,
+no markdown fences. Each element:
+{"name": "kebab-case, 2-4 words, e.g. write-migration",
+ "description": "one line: when to reach for this skill",
+ "instructions": "the method: concrete numbered steps and the standard the result must meet, 5-15 lines",
+ "must_not": "things never to do in this job, one per line, or an empty string"}
+Never include credentials, tokens, or private URLs.
+
+User's need: "##;
+
+/// Drafts skills for a person to read, edit and save through `create`,
+/// which checks the workspace and the name then. Touches no workspace and
+/// saves nothing — which is why the ledger leaves it out (`audit_layer::QUIET`).
+async fn generate(
+    State(state): State<AppState>,
+    _caller: Caller,
+    Json(body): Json<GenerateBody>,
+) -> Result<Json<Value>, ApiError> {
+    if body.description.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "description is required".into()));
+    }
+    let default_engine = state.orchestrator.default_engine();
+    let engine_id = body.engine.as_deref().unwrap_or(&default_engine);
+    let engine = state.orchestrator.engine(engine_id).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("unknown engine {engine_id}"),
+        )
+    })?;
+    // Medium by default: writing a method down is ordinary work, and the
+    // person can ask for more in the wizard.
+    let tier = body.model_tier.unwrap_or(ModelTier::Medium);
+    let model_id = state.orchestrator.model_for(engine_id, tier);
+    let prompt = format!("{GENERATE_PROMPT}{}\"", body.description.trim());
+    let output = utility_run(
+        engine,
+        model_id,
+        prompt,
+        Some(ReasoningEffort::Medium),
+        Duration::from_secs(180),
+    )
+    .await
+    .map_err(internal)?;
+    match extract_json(&output) {
+        Ok(Value::Array(drafts)) => Ok(Json(json!({ "drafts": drafts }))),
+        Ok(single @ Value::Object(_)) => Ok(Json(json!({ "drafts": [single] }))),
+        _ => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("model output was not valid JSON:\n{output}"),
+        )),
+    }
 }
 
 async fn one(state: &AppState, id: Uuid) -> Result<Json<Value>, ApiError> {

@@ -85,6 +85,14 @@ export interface Skill {
   personal: boolean;
 }
 
+/** A skill the model drafted, before anybody saved it. */
+export interface SkillDraft {
+  name: string;
+  description?: string;
+  instructions?: string;
+  must_not?: string;
+}
+
 /** What adding a project did with your rules: files written and committed, or why not. */
 export interface RulesSeeded {
   written: string[];
@@ -2894,6 +2902,11 @@ export const api = {
   forgetMemory: (id: string) =>
     fetch(`/api/agent-memories/${id}`, { method: "DELETE" }).then((r) =>
       json<{ deleted: boolean }>(r),
+    ),
+  /** Drafts only: each is saved, if at all, through `createSkill`. */
+  generateSkills: (description: string, engine?: string, modelTier?: Tier) =>
+    post("/api/skills/generate", { description, engine, model_tier: modelTier }).then((r) =>
+      json<{ drafts: SkillDraft[] }>(r),
     ),
   generateAgents: (description: string, engine?: string, modelTier?: Tier) =>
     post("/api/agents/generate", { description, engine, model_tier: modelTier }).then((r) =>

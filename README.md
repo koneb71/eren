@@ -890,6 +890,11 @@ are on, the one local person's before that.
   the Skills page, the card picker and `@` in chat — instead of one. It still applies only where
   you name it, and its name must be free in each of your workspaces.
 
+**Generating skills.** Skills → Generate with AI drafts one to three narrow skills from a
+description of the job, on your own CLI login (Medium tier by default). Nothing is saved by
+generating: you edit each draft and save it — as a workspace skill or a personal one — through
+the same checks a hand-written skill meets.
+
 #### Installing a skill from a registry
 
 Eren can install Agent Skills into a project: `npx skills add owner/repo` is run in the
