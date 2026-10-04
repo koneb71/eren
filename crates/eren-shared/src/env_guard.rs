@@ -30,11 +30,25 @@
 /// [`crate::brand::var`]) and both have to go: [`own_secrets`] spells them out.
 pub const OWN_SECRETS: &[&str] = &["S3_ACCESS_KEY", "S3_SECRET_KEY", "ACCESS_TOKEN"];
 
-/// Every variable name [`OWN_SECRETS`] can be set under.
+/// Eren's own, read under exactly one name and stripped under exactly that.
+///
+/// `DATABASE_URL` is the database Eren itself runs on — any `DATABASE_URL`
+/// in its environment is the one `serve` connected to — so a child that
+/// inherited it held Eren's whole state, password included, and a project's
+/// test suite run as a check would have pointed its fixtures at it. Nothing
+/// Eren starts needs it: the managed Postgres is configured by its own
+/// arguments, and a preview gets only what its recipe declares. It is still
+/// not auth-shaped ([`is_auth_env`] answers whether a *requested* variable
+/// may be set, and a person may hand an MCP server a database of its own).
+pub const OWN_UNPREFIXED: &[&str] = &["DATABASE_URL"];
+
+/// Every variable name [`OWN_SECRETS`] and [`OWN_UNPREFIXED`] can be set
+/// under.
 pub fn own_secrets() -> impl Iterator<Item = String> {
     OWN_SECRETS
         .iter()
         .flat_map(|key| crate::brand::env_names(key))
+        .chain(OWN_UNPREFIXED.iter().map(|key| key.to_string()))
 }
 
 /// A child process, minus the secrets Eren itself holds.
@@ -232,8 +246,12 @@ mod own_secret_tests {
     fn a_command_does_not_inherit_what_eren_owns() {
         let cmd = command("true");
         let names: Vec<String> = own_secrets().collect();
-        // Both spellings of both keys.
-        assert_eq!(names.len(), OWN_SECRETS.len() * 2, "{names:?}");
+        // Both spellings of each prefixed key, and the unprefixed ones once.
+        assert_eq!(
+            names.len(),
+            OWN_SECRETS.len() * 2 + OWN_UNPREFIXED.len(),
+            "{names:?}"
+        );
         for key in names {
             let removed = cmd
                 .as_std()
@@ -241,6 +259,26 @@ mod own_secret_tests {
                 .any(|(k, v)| k == std::ffi::OsStr::new(&key) && v.is_none());
             assert!(removed, "{key} is inherited by a child");
         }
+    }
+
+    /// Eren's own database is stripped under its one name — and only that
+    /// name, so nothing that merely contains it is caught.
+    #[test]
+    fn a_command_does_not_inherit_erens_database() {
+        let cmd = command("true");
+        let removed: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.iter().any(|k| k == "DATABASE_URL"), "{removed:?}");
+        assert!(!removed
+            .iter()
+            .any(|k| k.contains("DATABASE_URL") && k != "DATABASE_URL"));
+        // A different question, with a different answer: a person may still
+        // hand a tool a database of its own.
+        assert!(!is_auth_env("DATABASE_URL"));
     }
 
     /// The rule above only holds if nothing goes around it. This is the check
@@ -278,12 +316,13 @@ mod own_secret_tests {
         );
     }
 
-    /// Whatever Eren decides to own, it must also recognise as a secret —
-    /// otherwise a future addition could be passed through `extra_env` and
-    /// sail past the very check that exists to stop it.
+    /// Whatever credential Eren decides to own, it must also recognise as a
+    /// secret — otherwise a future addition could be passed through
+    /// `extra_env` and sail past the very check that exists to stop it.
+    /// [`OWN_UNPREFIXED`] is the exception, and says why.
     #[test]
     fn everything_eren_owns_reads_as_a_secret() {
-        for key in own_secrets() {
+        for key in OWN_SECRETS.iter().flat_map(|k| crate::brand::env_names(k)) {
             assert!(is_auth_env(&key), "{key} is not recognised as a secret");
         }
     }

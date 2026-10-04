@@ -367,8 +367,9 @@ async fn create(
     Json(body): Json<CreateTask>,
 ) -> Result<Json<Value>, ApiError> {
     // The card's project, and everything the card is bound to. The articles
-    // and attachments need nothing here: `link_articles` holds each to the
-    // card's workspace and `attachments::claim` to its project.
+    // and attachments need nothing here: each article is held to the card's
+    // workspace below, and `attachments::claim_in` holds each upload to its
+    // project.
     caller
         .require(&state, Owned::Project(body.project_id))
         .await?;
@@ -387,6 +388,27 @@ async fn create(
     if let Some(agent_id) = body.agent_id {
         assignable(&state, agent_id).await?;
     }
+    // Owned is not enough: one person may own two workspaces, and a card
+    // bound to an agent, team, skill, goal or page of the other one is the
+    // invisible assignee `require_same_workspace` exists to refuse on an
+    // edit. Checked against the project, because the card does not exist
+    // yet — and before it does, so a refusal leaves nothing behind.
+    let project = body.project_id;
+    if let Some(agent_id) = body.agent_id {
+        require_in_project_workspace(&state, project, "agents", agent_id).await?;
+    }
+    if let Some(team_id) = body.team_id {
+        require_in_project_workspace(&state, project, "teams", team_id).await?;
+    }
+    if let Some(goal_id) = body.goal_id {
+        require_in_project_workspace(&state, project, "goals", goal_id).await?;
+    }
+    for id in &body.article_ids {
+        require_in_project_workspace(&state, project, "kb_articles", *id).await?;
+    }
+    if let Some(skill_id) = body.skill_id {
+        require_skill_for_project(&state, project, skill_id).await?;
+    }
     let tier = body.model_tier.as_str();
     // Store NULL when the caller didn't choose, so the card inherits whatever
     // the default is *when it runs* rather than freezing today's value.
@@ -397,6 +419,10 @@ async fn create(
             .unwrap()
             .to_string()
     });
+    // The card, its pages and its attachments in one transaction: a refused
+    // attachment used to leave the card behind — able to start without what
+    // it was meant to see, and duplicated by the client's retry.
+    let mut tx = state.db.pool.begin().await.map_err(internal)?;
     let row = sqlx::query(
         "INSERT INTO tasks (project_id, title, prompt, model_tier, permission_mode, engine, agent_id, skill_id, team_id, board_column, plan_first, effort, start_when_unblocked, goal_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'backlog',$10,$11,$12,
@@ -417,28 +443,39 @@ async fn create(
     .bind(body.effort.map(|e| e.as_str().to_string()))
     .bind(body.start_when_unblocked)
     .bind(body.goal_id)
-    .fetch_one(&state.db.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
     let task_id: Uuid = row.get("id");
-    // Handed to an agent that pulls its own work, and not started here: the
-    // agent hears about it now rather than at its next beat.
-    if let (Some(agent), false) = (body.agent_id, body.start) {
-        eren_core::heartbeat::wake(&state.db, agent, "assigned", Some(task_id)).await;
-    }
     // Before the run is enqueued, for the same reason attachments are: the
     // prompt is assembled from whatever is bound when the run is picked up.
-    link_articles(&state, task_id, &body.article_ids).await?;
-
-    // Must happen before the run is enqueued: the orchestrator assembles the
-    // prompt from whatever is bound at the time it picks the run up.
-    attachments::claim(
-        &state.db,
+    // Each page was held to the workspace above.
+    if !body.article_ids.is_empty() {
+        sqlx::query(
+            "INSERT INTO task_articles (task_id, article_id)
+             SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(&body.article_ids)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    }
+    attachments::claim_in(
+        &mut tx,
         &body.attachment_ids,
         attachments::Home::Project(body.project_id),
         attachments::Owner::Task(task_id),
     )
     .await?;
+    tx.commit().await.map_err(internal)?;
+
+    // Handed to an agent that pulls its own work, and not started here: the
+    // agent hears about it now rather than at its next beat — only once the
+    // card is whole, so a beat cannot pick up half of one.
+    if let (Some(agent), false) = (body.agent_id, body.start) {
+        eren_core::heartbeat::wake(&state.db, agent, "assigned", Some(task_id)).await;
+    }
 
     let run_id = if body.start {
         // Same gate as `start`: a card created with start=true must not slip
@@ -1281,6 +1318,55 @@ async fn require_same_workspace(
     ))
 }
 
+/// [`require_same_workspace`] for a card not yet written: `table`'s row must
+/// be in `project_id`'s workspace.
+async fn require_in_project_workspace(
+    state: &AppState,
+    project_id: Uuid,
+    table: &str,
+    id: Uuid,
+) -> Result<(), ApiError> {
+    // `table` is a literal from the call sites, never user input.
+    let ok: Option<i32> = sqlx::query_scalar(&format!(
+        "SELECT 1 FROM {table} x JOIN projects p ON p.workspace_id = x.workspace_id
+          WHERE p.id = $1 AND x.id = $2"
+    ))
+    .bind(project_id)
+    .bind(id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(internal)?;
+    ok.map(|_| ()).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "that {} is not in this card's workspace",
+            table.trim_end_matches('s')
+        ),
+    ))
+}
+
+/// [`require_skill_for_card`] for a card not yet written.
+async fn require_skill_for_project(
+    state: &AppState,
+    project_id: Uuid,
+    skill_id: Uuid,
+) -> Result<(), ApiError> {
+    let ok: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM skills s, projects p
+          WHERE p.id = $1 AND s.id = $2
+            AND skill_in_workspace(s.workspace_id, s.owner_id, p.workspace_id)",
+    )
+    .bind(project_id)
+    .bind(skill_id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(internal)?;
+    ok.map(|_| ()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "that skill is not in this card's workspace".into(),
+    ))
+}
+
 /// A skill a card may use: one its workspace can name — its own, or a
 /// personal skill of the workspace's owner (`skill_in_workspace`).
 async fn require_skill_for_card(
@@ -1530,6 +1616,14 @@ async fn start_bakeoff(
     caller.require(&state, Owned::Task(task_id)).await?;
     for v in &body.variants {
         caller.require_opt(&state, v.agent_id, Owned::Agent).await?;
+        // Each variant is a run of this card: its agent must be one the
+        // card's workspace can see, and its engine must honour the mode it
+        // would run in — refused here, at the click, rather than as a failed
+        // variant after the others have spent their tokens.
+        if let Some(agent_id) = v.agent_id {
+            require_same_workspace(&state, task_id, "agents", agent_id).await?;
+        }
+        vet_variant(&state, task_id, v.agent_id, v.engine.as_deref()).await?;
     }
     let variants: Vec<Variant> = body
         .variants
@@ -1551,6 +1645,34 @@ async fn start_bakeoff(
             false => (StatusCode::BAD_REQUEST, e.to_string()),
         })?;
     Ok(Json(json!({ "runIds": run_ids })))
+}
+
+/// [`eren_core::Orchestrator::vet_card_as`] for one variant of a bake-off,
+/// plus the one thing it leaves to dispatch: an engine this machine does not
+/// have, which here would only surface as a failed variant.
+async fn vet_variant(
+    state: &AppState,
+    task_id: Uuid,
+    agent_id: Option<Uuid>,
+    engine: Option<&str>,
+) -> Result<(), ApiError> {
+    if let Some(engine_id) = engine {
+        if state.orchestrator.engine(engine_id).is_none() {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("there is no engine called \"{engine_id}\" on this machine"),
+            ));
+        }
+    }
+    match state
+        .orchestrator
+        .vet_card_as(task_id, agent_id, engine)
+        .await
+        .map_err(internal)?
+    {
+        Some(reason) => Err((StatusCode::CONFLICT, reason)),
+        None => Ok(()),
+    }
 }
 
 /// The variants of a task, with their diffs, so they can be read side by side.

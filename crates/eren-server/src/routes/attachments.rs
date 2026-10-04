@@ -427,8 +427,28 @@ pub(crate) enum Owner {
 /// cross-project check, and the double-claim check: an id that belongs to
 /// another project or workspace, or has already been used, simply doesn't
 /// match, and the affected-row count catches it.
+///
+/// All or nothing: a refusal claims none of them, where it used to leave the
+/// ids that did match bound to an owner the caller was told had failed.
 pub(crate) async fn claim(
     db: &eren_core::db::Db,
+    ids: &[Uuid],
+    home: Home,
+    owner: Owner,
+) -> Result<(), ApiError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = db.pool.begin().await.map_err(internal)?;
+    claim_in(&mut tx, ids, home, owner).await?;
+    tx.commit().await.map_err(internal)
+}
+
+/// [`claim`] inside the caller's transaction, so the owner's own row and its
+/// attachments are written together or not at all. On an `Err` the caller
+/// must not commit.
+pub(crate) async fn claim_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ids: &[Uuid],
     home: Home,
     owner: Owner,
@@ -458,7 +478,7 @@ pub(crate) async fn claim(
         .bind(ids)
         .bind(home.project())
         .bind(home.workspace())
-        .execute(&db.pool)
+        .execute(&mut **tx)
         .await
         .map_err(internal)?
         .rows_affected();

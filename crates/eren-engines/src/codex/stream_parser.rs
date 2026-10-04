@@ -86,13 +86,23 @@ impl StreamState {
                 result_text: self.text,
             }
         } else {
-            ErenEvent::RunFailed {
-                // An error item is only an explanation once the process has
-                // actually failed — see `last_error`.
-                reason: self
-                    .failure
-                    .or(self.last_error)
-                    .unwrap_or_else(|| "codex exited without completing the turn".to_string()),
+            // An error item is only an explanation once the process has
+            // actually failed — see `last_error`.
+            let reason = self
+                .failure
+                .or(self.last_error)
+                .unwrap_or_else(|| "codex exited without completing the turn".to_string());
+            // Codex reports a spent plan as an ordinary failed turn ("You've
+            // hit your usage limit", a 429). Read as a failure, the card went
+            // to review for a person to retry by hand; read as a limit, the
+            // queue waits it out and tries again.
+            if eren_shared::rate_limit_signal(&reason) {
+                ErenEvent::RateLimited {
+                    reset_at: None,
+                    message: reason,
+                }
+            } else {
+                ErenEvent::RunFailed { reason }
             }
         }
     }
@@ -196,6 +206,11 @@ pub fn parse_line(line: &str, state: &mut StreamState) -> Vec<ErenEvent> {
                 "agentMessage" | "agent_message" | "assistantMessage" => {
                     if kind.ends_with(".completed") {
                         if let Some(text) = item_text(item) {
+                            // Separate messages stay separate paragraphs, or
+                            // "…sandbox mode." and "ls output…" run together.
+                            if !state.text.is_empty() {
+                                state.text.push_str("\n\n");
+                            }
                             state.text.push_str(&text);
                             out.push(ErenEvent::AssistantText { text });
                         }
@@ -358,6 +373,18 @@ mod recorded {
     }
 
     #[test]
+    fn several_messages_are_kept_as_separate_paragraphs() {
+        let (_, state) = drive(WITH_TOOL);
+        let ErenEvent::RunCompleted { result_text, .. } = state.finish(true) else {
+            panic!("expected a completed run")
+        };
+        assert_eq!(
+            result_text,
+            "I am running under read-only sandbox mode.\n\nls output: run1.jsonl"
+        );
+    }
+
+    #[test]
     fn an_error_item_does_not_fail_a_run_that_succeeded() {
         // The regression this fixture exists for. Codex emits an error item
         // for a merely degraded turn and then finishes; promoting it to a
@@ -485,6 +512,28 @@ mod tests {
             panic!("a failure seen in the stream must beat a zero exit code")
         };
         assert_eq!(reason, "model refused");
+    }
+
+    #[test]
+    fn a_spent_plan_is_a_rate_limit_not_a_failure() {
+        for line in [
+            r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again later."}}"#,
+            r#"{"type":"error","message":"stream error: unexpected status 429 Too Many Requests"}"#,
+        ] {
+            let (_, state) = drive(&[r#"{"type":"thread.started","thread_id":"t"}"#, line]);
+            match state.finish(false) {
+                ErenEvent::RateLimited { reset_at, message } => {
+                    assert_eq!(reset_at, None);
+                    assert!(!message.is_empty());
+                }
+                other => panic!("expected a rate limit, got {other:?}"),
+            }
+        }
+        // An error item that says so explains a failed exit the same way.
+        let (_, state) = drive(&[
+            r#"{"type":"item.completed","item":{"id":"e","type":"error","message":"429 Too Many Requests"}}"#,
+        ]);
+        assert!(matches!(state.finish(false), ErenEvent::RateLimited { .. }));
     }
 
     #[test]

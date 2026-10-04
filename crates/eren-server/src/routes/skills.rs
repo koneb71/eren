@@ -257,6 +257,7 @@ async fn generate(
     let model_id = state.orchestrator.model_for(engine_id, tier);
     let prompt = format!("{GENERATE_PROMPT}{}\"", body.description.trim());
     let output = utility_run(
+        &state.db,
         engine,
         model_id,
         prompt,
@@ -264,7 +265,7 @@ async fn generate(
         Duration::from_secs(180),
     )
     .await
-    .map_err(internal)?;
+    .map_err(super::run_refused)?;
     match extract_json(&output) {
         Ok(Value::Array(drafts)) => Ok(Json(json!({ "drafts": drafts }))),
         Ok(single @ Value::Object(_)) => Ok(Json(json!({ "drafts": [single] }))),
@@ -333,6 +334,7 @@ async fn try_it(
     let prompt = eren_core::skills::augment_prompt(body.prompt.trim(), Some(&skill));
 
     let output = utility_run(
+        &state.db,
         engine,
         model_id,
         prompt.clone(),
@@ -340,7 +342,7 @@ async fn try_it(
         Duration::from_secs(120),
     )
     .await
-    .map_err(internal)?;
+    .map_err(super::run_refused)?;
 
     Ok(Json(json!({
         "output": output,

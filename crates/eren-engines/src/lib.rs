@@ -93,6 +93,13 @@ pub struct Capabilities {
     /// is refused by `vet` rather than quietly widened to Full Auto, for the
     /// same reason `Reviewed` is.
     pub auto_edit: bool,
+    /// Can take a pass that must not change anything — a plan, a summary, a
+    /// drafting call — in a mode where nothing can write, however the CLI
+    /// spells that. `false` ⇒ such a pass is refused at the click (a plan-first
+    /// card by `vet_card`, a drafting call by `utility_run`, both as a 409)
+    /// rather than by the adapter once it starts. Not `enforces_denied_tools`:
+    /// Cursor's ask mode cannot write, but it does not refuse one named tool.
+    pub read_only_passes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +194,13 @@ pub trait Engine: Send + Sync {
     /// Probe the CLI: is it installed and logged in? Implemented by running
     /// the binary, never by inspecting its config files.
     async fn detect(&self) -> Option<EngineInfo>;
+
+    /// Re-read whatever `start` resolves a run against that can change while
+    /// Eren is running — for a local runtime, the models it holds. Called
+    /// right before every `start`, because `start` is synchronous and cannot
+    /// go and ask. Nothing to re-read for a CLI whose catalog is its own, so
+    /// the default does nothing.
+    async fn refresh(&self) {}
 
     fn start(&self, spec: RunSpec) -> anyhow::Result<EngineProcess>;
 
@@ -399,7 +413,9 @@ pub(crate) fn replaying(dir: &std::path::Path, fixture: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    // Linux only: ETXTBSY is Linux's refusal. macOS execs a script that is
+    // still open for writing, so there is nothing there to wait for.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_stand_in_still_open_for_writing_is_waited_for() {
         let dir = tempfile::tempdir().unwrap();
@@ -454,6 +470,7 @@ mod tests {
             enforces_denied_tools: true,
             mcp_tools: true,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 

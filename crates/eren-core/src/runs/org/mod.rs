@@ -1643,6 +1643,8 @@ impl Orchestrator {
 
         // Deliberately not queued: a worker's tool call is blocked waiting
         // on this, and the run already holds its concurrency permit.
+        // What a local runtime holds now, not at boot — see `Engine::refresh`.
+        engine.refresh().await;
         let mut proc = engine.start(spec)?;
         let mut text = String::new();
         while let Some(event) = proc.events.recv().await {

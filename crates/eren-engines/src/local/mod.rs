@@ -48,6 +48,7 @@ use crate::{Capabilities, Engine, EngineInfo, EngineProcess, RunSpec};
 use async_trait::async_trait;
 use eren_shared::env_guard;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,11 +132,18 @@ pub struct LocalEngine {
     configured_host: Option<String>,
     /// What actually runs the agent loop.
     runner: OpenCodeEngine,
-    /// Full model ids, as of the last `detect`. `start` is synchronous and
-    /// cannot go and ask, so this is how a run resolves a model against what
-    /// the machine really has rather than against a tier mapping that may
-    /// predate the runtime being installed.
+    /// Full model ids, as of the last `detect` or `refresh`. `start` is
+    /// synchronous and cannot go and ask, so this is how a run resolves a
+    /// model against what the machine really has rather than against a tier
+    /// mapping that may predate the runtime being installed.
     catalog: Mutex<Vec<String>>,
+    /// Whether `catalog` is what the runtime said the last time it was asked.
+    /// `false` after a re-read that failed: then it may be stale, and an id
+    /// it lacks may be one pulled since.
+    catalog_current: AtomicBool,
+    /// The runtime's CLI, where `detect` found it, so a re-read does not go
+    /// looking again.
+    bin: Mutex<Option<PathBuf>>,
     /// The address `detect` saw the runtime on, when its CLI said.
     observed_host: Mutex<Option<String>>,
 }
@@ -147,6 +155,8 @@ impl LocalEngine {
             configured_host: configured_host.map(|h| h.trim_end_matches('/').to_string()),
             runner: OpenCodeEngine::default(),
             catalog: Mutex::new(vec![]),
+            catalog_current: AtomicBool::new(false),
+            bin: Mutex::new(None),
             observed_host: Mutex::new(None),
         }
     }
@@ -185,12 +195,44 @@ impl LocalEngine {
         None
     }
 
+    /// The models the runtime holds right now, as full ids. `None` when it
+    /// could not be asked.
+    async fn list_models(&self, bin: &std::path::Path) -> Option<Vec<String>> {
+        let args: &[&str] = match self.runtime {
+            // Through the daemon, so this failing also says it is down.
+            Runtime::Ollama => &["list"],
+            Runtime::LmStudio => &["ls", "--json"],
+        };
+        let out = env_guard::command(bin).args(args).output().await.ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let names = match self.runtime {
+            Runtime::Ollama => probe::ollama_models(&stdout),
+            Runtime::LmStudio => probe::lmstudio_models(&stdout),
+        };
+        Some(
+            names
+                .into_iter()
+                .map(|n| format!("{}/{n}", self.runtime.id()))
+                .collect(),
+        )
+    }
+
     /// The model this run should actually ask for.
     ///
     /// Three cases, in order: an id already naming this runtime passes
-    /// through; a bare name — what somebody copies out of the runtime's own
-    /// UI — gets its prefix if the runtime really has it; anything else is a
-    /// tier still pointing where it pointed before this engine existed.
+    /// through if the runtime has it — or if the catalog could not be
+    /// re-read, when it may simply be newer than what was last seen; a bare
+    /// name — what somebody copies out of the runtime's own UI — gets its
+    /// prefix if the runtime really has it; anything else is a tier still
+    /// pointing where it pointed before this engine existed.
+    ///
+    /// A named id the runtime has just said it does not hold is refused, not
+    /// substituted: unlike a tier left over from before, it is a choice
+    /// somebody made, and running another model in its place would answer a
+    /// question they did not ask.
     ///
     /// That last case **substitutes rather than refuses**, which is the
     /// opposite of what [`crate::vet`] does and is deliberate. `vet` refuses
@@ -203,7 +245,20 @@ impl LocalEngine {
         let catalog = self.catalog.lock().unwrap().clone();
         let prefix = format!("{}/", self.runtime.id());
         if requested.starts_with(&prefix) {
-            return Ok(requested.to_string());
+            if catalog.iter().any(|m| m == requested)
+                || !self.catalog_current.load(Ordering::Relaxed)
+            {
+                return Ok(requested.to_string());
+            }
+            anyhow::bail!(
+                "{} does not have {requested}. Pull or load it, or pick one it has: {}.",
+                self.runtime.label(),
+                if catalog.is_empty() {
+                    "it has none".to_string()
+                } else {
+                    catalog.join(", ")
+                }
+            );
         }
         let prefixed = format!("{prefix}{requested}");
         if catalog.contains(&prefixed) {
@@ -211,7 +266,7 @@ impl LocalEngine {
         }
         let first = catalog.first().cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "{} has no models Eren can see. Pull or load one, then restart Eren.",
+                "{} has no models Eren can see. Pull or load one, then try again.",
                 self.runtime.label()
             )
         })?;
@@ -258,6 +313,7 @@ impl Engine for LocalEngine {
             .filter(|o| o.status.success())?;
 
         let bin = self.locate().await?;
+        *self.bin.lock().unwrap() = Some(bin.clone());
         let run = |args: Vec<&'static str>| {
             let bin = bin.clone();
             async move {
@@ -268,14 +324,10 @@ impl Engine for LocalEngine {
             }
         };
 
-        let (version, names, observed) = match self.runtime {
+        let (version, observed) = match self.runtime {
             Runtime::Ollama => {
                 let version = probe::ollama_version(&run(vec!["--version"]).await?)?;
-                // Doubles as the liveness check: `ollama list` goes through
-                // the daemon, so it succeeding is what says the runtime can
-                // serve anything at all.
-                let names = probe::ollama_models(&run(vec!["list"]).await?);
-                (version, names, None)
+                (version, None)
             }
             Runtime::LmStudio => {
                 let status = probe::lms_status(&run(vec!["status"]).await?);
@@ -288,16 +340,14 @@ impl Engine for LocalEngine {
                     return None;
                 }
                 let version = probe::lms_version(&run(vec!["version"]).await?)?;
-                let names = probe::lmstudio_models(&run(vec!["ls", "--json"]).await?);
                 let observed = status.port.map(|p| format!("http://127.0.0.1:{p}"));
-                (version, names, observed)
+                (version, observed)
             }
         };
-
-        let ids: Vec<String> = names
-            .into_iter()
-            .map(|n| format!("{}/{n}", self.runtime.id()))
-            .collect();
+        // Doubles as the liveness check: `ollama list` goes through the
+        // daemon, so it succeeding is what says the runtime can serve
+        // anything at all.
+        let ids = self.list_models(&bin).await?;
         // A runtime that is running but holds nothing it could answer with is
         // not something to put in a picker: every run started on it would
         // fail, and the failure would be about a model rather than about the
@@ -307,6 +357,7 @@ impl Engine for LocalEngine {
         }
 
         *self.catalog.lock().unwrap() = ids.clone();
+        self.catalog_current.store(true, Ordering::Relaxed);
         *self.observed_host.lock().unwrap() = observed;
 
         Some(EngineInfo {
@@ -318,6 +369,22 @@ impl Engine for LocalEngine {
             providers: vec![],
             models: ids,
         })
+    }
+
+    /// What the runtime holds now, not at boot: a model pulled since is
+    /// there to run, and one removed since is said to be gone by name
+    /// rather than by OpenCode failing to reach it.
+    async fn refresh(&self) {
+        let Some(bin) = self.bin.lock().unwrap().clone() else {
+            return;
+        };
+        match self.list_models(&bin).await {
+            Some(ids) => {
+                *self.catalog.lock().unwrap() = ids;
+                self.catalog_current.store(true, Ordering::Relaxed);
+            }
+            None => self.catalog_current.store(false, Ordering::Relaxed),
+        }
     }
 
     fn start(&self, mut spec: RunSpec) -> anyhow::Result<EngineProcess> {
@@ -437,19 +504,57 @@ mod tests {
     fn stocked(runtime: Runtime, models: &[&str]) -> LocalEngine {
         let e = LocalEngine::new(runtime, None);
         *e.catalog.lock().unwrap() = models.iter().map(|m| m.to_string()).collect();
+        e.catalog_current.store(true, Ordering::Relaxed);
         e
     }
 
     #[test]
-    fn an_id_that_already_names_this_runtime_passes_through() {
+    fn an_id_that_already_names_this_runtime_passes_through_if_it_is_there() {
         let e = stocked(Runtime::Ollama, &["ollama/deepseek-r1:latest"]);
         assert_eq!(
             e.resolve_model("ollama/deepseek-r1:latest").unwrap(),
             "ollama/deepseek-r1:latest"
         );
-        // Even one the catalog hasn't seen: a model pulled since the last
-        // probe is a real model, and refusing it would make "restart eren"
-        // the answer to something that needs no restart.
+        // One the runtime has just said it does not hold is refused by name,
+        // with what it does hold — not swapped for a model nobody chose.
+        let err = e
+            .resolve_model("ollama/llama3:latest")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ollama/llama3:latest"), "{err}");
+        assert!(err.contains("ollama/deepseek-r1:latest"), "{err}");
+        // But a catalog that could not be re-read may be older than the
+        // model: a pull since then is real, so the id goes through.
+        e.catalog_current.store(false, Ordering::Relaxed);
+        assert_eq!(
+            e.resolve_model("ollama/llama3:latest").unwrap(),
+            "ollama/llama3:latest"
+        );
+    }
+
+    /// A model pulled after boot is runnable without a restart: the catalog
+    /// is re-read before the run starts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_model_pulled_since_boot_is_found_before_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.txt");
+        std::fs::write(
+            &list,
+            "NAME ID SIZE MODIFIED\nqwen3:8b abc 5 GB 1 day ago\n",
+        )
+        .unwrap();
+        let bin = crate::stand_in(dir.path(), &format!("cat '{}'", list.display()));
+        let e = stocked(Runtime::Ollama, &["ollama/qwen3:8b"]);
+        *e.bin.lock().unwrap() = Some(bin.into());
+        assert!(e.resolve_model("ollama/llama3:latest").is_err());
+
+        std::fs::write(
+            &list,
+            "NAME ID SIZE MODIFIED\nqwen3:8b abc 5 GB 1 day ago\nllama3:latest def 4 GB now\n",
+        )
+        .unwrap();
+        e.refresh().await;
         assert_eq!(
             e.resolve_model("ollama/llama3:latest").unwrap(),
             "ollama/llama3:latest"
@@ -502,7 +607,12 @@ mod tests {
             Runtime::LmStudio,
             &["lmstudio/google/gemma-4-e4b", "lmstudio/qwen3.5-9b"],
         );
-        for requested in ["", "claude-opus-5", "google/gemma-4-e4b", "lmstudio/x"] {
+        for requested in [
+            "",
+            "claude-opus-5",
+            "google/gemma-4-e4b",
+            "lmstudio/qwen3.5-9b",
+        ] {
             let id = e.resolve_model(requested).unwrap();
             assert!(
                 eren_shared::is_provider_model_shape(&id),

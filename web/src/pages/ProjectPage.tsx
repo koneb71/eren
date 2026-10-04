@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { parseForecastAsk } from "../lib/forecast";
 import { useParams, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
@@ -68,6 +68,20 @@ export default function ProjectPage() {
   const { active } = useWorkspace();
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  // Another project's cards and header must not stay on screen while this
+  // one's load. Reset during render, not in an effect: an effect runs after
+  // the paint, which is the tick of the old board this exists to prevent.
+  const [shownFor, setShownFor] = useState(projectId);
+  if (shownFor !== projectId) {
+    setShownFor(projectId);
+    setTasks([]);
+    setProject(null);
+  }
+  // Only the newest board request lands, and only for the project still open:
+  // a poll that left before a switch (or before a move) is older news.
+  const openProject = useRef(projectId);
+  openProject.current = projectId;
+  const boardGen = useRef(0);
   // Narrow the board to the cards serving one goal. Offered only once a card
   // on this board serves one.
   const [goalFilter, setGoalFilter] = useState("");
@@ -111,7 +125,9 @@ export default function ProjectPage() {
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
+    const gen = ++boardGen.current;
     const t = await api.tasks({ projectId });
+    if (gen !== boardGen.current || openProject.current !== projectId) return;
     setTasks(t.tasks);
   }, [projectId]);
 
@@ -143,7 +159,14 @@ export default function ProjectPage() {
   // header reading "Project" and every setting silently defaulted.
   useEffect(() => {
     if (!projectId) return;
-    api.project(projectId).then(setProject).catch(() => setProject(null));
+    let stale = false;
+    api
+      .project(projectId)
+      .then((p) => !stale && setProject(p))
+      .catch(() => !stale && setProject(null));
+    return () => {
+      stale = true;
+    };
   }, [projectId]);
 
   useEffect(() => {

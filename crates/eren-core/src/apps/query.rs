@@ -388,8 +388,23 @@ pub fn projection(model: &Model) -> String {
         };
         parts.push(format!("'{}', {}", field.name, value));
     }
-    format!("jsonb_build_object({})", parts.join(", "))
+    // Postgres takes at most 100 arguments to a function, and each column is
+    // two of them, so a model past 47 fields could not be read at all. Built
+    // in chunks of at most 50 pairs and merged with `||`, which on two
+    // objects is their union.
+    let chunks: Vec<String> = parts
+        .chunks(PAIRS_PER_OBJECT)
+        .map(|c| format!("jsonb_build_object({})", c.join(", ")))
+        .collect();
+    match chunks.len() {
+        1 => chunks.into_iter().next().unwrap_or_default(),
+        _ => format!("({})", chunks.join(" || ")),
+    }
 }
+
+/// Key/value pairs in one `jsonb_build_object` — half of Postgres's
+/// 100-argument cap on a function call.
+const PAIRS_PER_OBJECT: usize = 50;
 
 #[cfg(test)]
 mod tests {
@@ -631,6 +646,28 @@ mod tests {
             p.contains("'qty', t.\"qty\""),
             "an int is fine as a number: {p}"
         );
+        assert!(p.contains("'id', t.\"id\"::text"));
+    }
+
+    #[test]
+    fn a_wide_model_stays_under_the_function_argument_cap() {
+        let fields: String = (0..60)
+            .map(|i| format!("      f{i}: {{ type: text }}\n"))
+            .collect();
+        let wide = manifest::parse(&format!("name: T\nmodels:\n  wide:\n    fields:\n{fields}"))
+            .unwrap()
+            .models
+            .remove(0);
+        let p = projection(&wide);
+        let objects: Vec<&str> = p.split("jsonb_build_object(").skip(1).collect();
+        assert_eq!(objects.len(), 2, "{p}");
+        for o in &objects {
+            // Each pair is "'name', value" — one comma inside, one between.
+            let args = o.matches(", ").count() + 1;
+            assert!(args <= 100, "{args} arguments in one call: {p}");
+        }
+        assert!(p.starts_with("(jsonb_build_object(") && p.contains(") || jsonb_build_object("));
+        assert!(p.contains("'f59', t.\"f59\""), "{p}");
         assert!(p.contains("'id', t.\"id\"::text"));
     }
 

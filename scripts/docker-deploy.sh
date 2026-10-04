@@ -203,4 +203,10 @@ case "$PUBLISHED" in
         fi
         ;;
 esac
+# The token is on unless .env turns it off, and the host's own browser
+# arrives through Docker's gateway, so every browser needs the link once.
+TOKEN_SETTING="$(setting EREN_ACCESS_TOKEN)"
+if [ "$(printf '%s' "$TOKEN_SETTING" | tr '[:upper:]' '[:lower:]')" != "off" ]; then
+    echo "  Each browser opens Eren's access link once: docker compose logs eren | grep 'open this link'"
+fi
 echo "  logs: docker compose logs -f eren"

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { load } from "js-yaml";
 import {
   depthOf,
   emitWorkflow,
@@ -81,6 +82,45 @@ describe("round-tripping", () => {
       { id: "a", prompt: "line one\nline two", needs: [] },
     ]);
     expect(yaml).toContain("    prompt: |\n      line one\n      line two");
+  });
+
+  it("keeps defaults.model, in its place among the defaults", () => {
+    const source = DEBATE.replace(
+      "  engine: claude-code\n",
+      "  engine: claude-code\n  model: complex\n",
+    );
+    const first = parseWorkflow(source);
+    expect(first.meta.model).toBe("complex");
+    const yaml = emitWorkflow(first.meta, first.steps);
+    expect(yaml).toContain(
+      "defaults:\n  engine: claude-code\n  model: complex\n  permission_mode: auto_edit\n",
+    );
+    expect(parseWorkflow(yaml).meta).toEqual(first.meta);
+  });
+
+  it("keeps a prompt whose first line is indented more than the rest", () => {
+    const prompt = "  indented first\nthen flush\n";
+    const yaml = emitWorkflow({ name: "t" }, [{ id: "a", prompt, needs: [] }]);
+    // Must be valid YAML, and say exactly what was typed.
+    const doc = load(yaml) as { steps: { prompt: string }[] };
+    expect(doc.steps[0].prompt).toBe(prompt);
+    expect(parseWorkflow(yaml).steps[0].prompt).toBe(prompt);
+  });
+
+  it("keeps the leading spaces of a prompt indented throughout", () => {
+    const prompt = "    code()\n    more()\n";
+    const yaml = emitWorkflow({ name: "t" }, [{ id: "a", prompt, needs: [] }]);
+    expect(yaml).toContain("    prompt: |2\n");
+    expect(parseWorkflow(yaml).steps[0].prompt).toBe(prompt);
+    // And stays stable through another save.
+    const again = parseWorkflow(yaml);
+    expect(emitWorkflow(again.meta, again.steps)).toBe(yaml);
+  });
+
+  it("keeps a prompt that opens with a line of spaces", () => {
+    const prompt = "   \nbody\n";
+    const yaml = emitWorkflow({ name: "t" }, [{ id: "a", prompt, needs: [] }]);
+    expect(parseWorkflow(yaml).steps[0].prompt).toBe(prompt);
   });
 
   it("omits optional fields rather than writing empty ones", () => {

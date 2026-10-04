@@ -56,79 +56,98 @@ export function useAttachments(projectId: string, workspaceId?: string) {
     if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
   };
 
+  // Everything with a side effect — the preview URL, the upload — happens out
+  // here, never inside a state updater: StrictMode runs updaters twice, which
+  // uploaded every file twice and leaked one preview URL per file. The room
+  // left is read from the ref, which is moved forward at once so a second drop
+  // in the same tick sees this one's files.
   const add = useCallback(
     (incoming: FileList | File[]) => {
       const files = Array.from(incoming);
       if (!files.length) return;
 
-      setItems((prev) => {
-        const room = MAX_ATTACHMENTS - prev.length;
-        const accepted = files.slice(0, Math.max(0, room));
-        const next = accepted.map((file) => {
-          const localId = `${file.name}-${file.size}-${crypto.randomUUID()}`;
-          const problem = preCheck(file);
-          const previewUrl = file.type.startsWith("image/")
-            ? URL.createObjectURL(file)
-            : undefined;
+      const room = MAX_ATTACHMENTS - itemsRef.current.length;
+      const accepted = files.slice(0, Math.max(0, room));
+      if (!accepted.length) return;
 
-          if (!problem) {
-            (projectId
-              ? api.uploadAttachments(projectId, [file])
-              : api.uploadWorkspaceAttachments(workspaceId ?? "", [file])
-            )
-              .then((r) =>
-                setItems((cur) =>
-                  cur.map((i) =>
-                    i.localId === localId
-                      ? { ...i, status: "ready" as const, remote: r.attachments[0] }
-                      : i,
-                  ),
-                ),
-              )
-              .catch((e) =>
-                setItems((cur) =>
-                  cur.map((i) =>
-                    i.localId === localId
-                      ? { ...i, status: "error" as const, error: String(e) }
-                      : i,
-                  ),
-                ),
-              );
-          }
+      const settle = (localId: string, patch: Partial<PendingAttachment>) =>
+        setItems((cur) => cur.map((i) => (i.localId === localId ? { ...i, ...patch } : i)));
 
-          return {
-            localId,
-            name: file.name,
-            size: file.size,
-            status: problem ? ("error" as const) : ("uploading" as const),
-            error: problem ?? undefined,
-            previewUrl,
-          };
-        });
-        return [...prev, ...next];
+      const next = accepted.map((file): PendingAttachment => {
+        const localId = `${file.name}-${file.size}-${crypto.randomUUID()}`;
+        const problem = preCheck(file);
+        const previewUrl = file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : undefined;
+
+        if (!problem) {
+          (projectId
+            ? api.uploadAttachments(projectId, [file])
+            : api.uploadWorkspaceAttachments(workspaceId ?? "", [file])
+          )
+            .then((r) => settle(localId, { status: "ready", remote: r.attachments[0] }))
+            .catch((e) => settle(localId, { status: "error", error: String(e) }));
+        }
+
+        return {
+          localId,
+          name: file.name,
+          size: file.size,
+          status: problem ? "error" : "uploading",
+          error: problem ?? undefined,
+          previewUrl,
+        };
       });
+      itemsRef.current = [...itemsRef.current, ...next];
+      setItems((prev) => [...prev, ...next]);
     },
     [projectId, workspaceId],
   );
 
   const remove = useCallback((localId: string) => {
-    setItems((prev) => {
-      const gone = prev.find((i) => i.localId === localId);
-      if (gone) {
-        revoke(gone);
-        // Best effort: an already-claimed row 409s, which is fine.
-        if (gone.remote) api.deleteAttachment(gone.remote.id).catch(() => {});
-      }
-      return prev.filter((i) => i.localId !== localId);
-    });
+    const gone = itemsRef.current.find((i) => i.localId === localId);
+    if (gone) {
+      revoke(gone);
+      // Best effort: an already-claimed row 409s, which is fine.
+      if (gone.remote) api.deleteAttachment(gone.remote.id).catch(() => {});
+    }
+    itemsRef.current = itemsRef.current.filter((i) => i.localId !== localId);
+    setItems((prev) => prev.filter((i) => i.localId !== localId));
   }, []);
 
   /** After a successful submit: the rows are claimed, so only drop local state. */
   const clear = useCallback(() => {
-    setItems((prev) => {
-      prev.forEach(revoke);
-      return [];
-    });
+    itemsRef.current.forEach(revoke);
+    itemsRef.current = [];
+    setItems([]);
+  }, []);
+
+  // Taken out of the composer for a submit that has not answered yet. Kept
+  // aside rather than dropped, so a refused submit can put them back with
+  // their previews intact.
+  const taken = useRef<PendingAttachment[]>([]);
+
+  /** Empty the composer for a submit, keeping the files for `restore`. */
+  const take = useCallback((): PendingAttachment[] => {
+    const out = itemsRef.current;
+    taken.current = [...taken.current, ...out];
+    itemsRef.current = [];
+    setItems([]);
+    return out;
+  }, []);
+
+  /** The submit was refused: the files go back in front of anything added since. */
+  const restore = useCallback((back: PendingAttachment[]) => {
+    if (!back.length) return;
+    taken.current = taken.current.filter((i) => !back.includes(i));
+    itemsRef.current = [...back, ...itemsRef.current];
+    setItems((prev) => [...back, ...prev.filter((i) => !back.includes(i))]);
+  }, []);
+
+  /** The submit landed: the rows are claimed, so only the previews go. */
+  const release = useCallback((done: PendingAttachment[]) => {
+    taken.current = taken.current.filter((i) => !done.includes(i));
+    done.forEach(revoke);
   }, []);
 
   // Discard anything still unclaimed when the composer goes away. Best effort
@@ -139,6 +158,9 @@ export function useAttachments(projectId: string, workspaceId?: string) {
         revoke(item);
         if (item.remote) api.deleteAttachment(item.remote.id).catch(() => {});
       });
+      // Mid-submit: whether they were claimed is not known yet, so only the
+      // previews go and the sweeper decides about the rows.
+      taken.current.forEach(revoke);
     };
   }, []);
 
@@ -183,6 +205,9 @@ export function useAttachments(projectId: string, workspaceId?: string) {
     add,
     remove,
     clear,
+    take,
+    restore,
+    release,
     onPaste,
     dropProps,
     dragging,

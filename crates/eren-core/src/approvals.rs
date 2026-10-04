@@ -45,6 +45,16 @@ fn not_waiting() -> Refusal {
     Refusal::Conflict("this run is not waiting for approval".into())
 }
 
+/// Whether the run's scope may spend more, asked before an approval queues
+/// it: a budget spent while the plan waited refuses here, with the policy's
+/// name, rather than holding the approved run in the queue. The planning
+/// pass was counted when it was claimed, so it is not held by its own count.
+async fn budget_allows(orch: &Orchestrator, run_id: Uuid) -> Result<(), Refusal> {
+    orch.budget_allows_more(run_id)
+        .await
+        .map_err(|over| Refusal::Gated(over.into()))
+}
+
 // ── A card's plan ───────────────────────────────────────────────────────────
 
 /// Start the work, from whatever the plan says now.
@@ -53,6 +63,7 @@ pub async fn approve_task_plan(orch: &Orchestrator, run_id: Uuid) -> Result<(), 
     crate::agents::assert_may_dispatch(&orch.db, run_id)
         .await
         .map_err(Refusal::Gated)?;
+    budget_allows(orch, run_id).await?;
     let updated = sqlx::query(
         "UPDATE runs SET plan_approved_at = now(), status = 'queued'
          WHERE id = $1 AND status = 'awaiting_approval'",
@@ -78,6 +89,7 @@ pub async fn revise_task_plan(
     crate::agents::assert_may_dispatch(&orch.db, run_id)
         .await
         .map_err(Refusal::Gated)?;
+    budget_allows(orch, run_id).await?;
     let note = note.trim();
     if note.is_empty() {
         return Err(Refusal::Invalid(
@@ -107,6 +119,7 @@ pub async fn approve_org_plan(orch: &Orchestrator, run_id: Uuid) -> Result<(), R
     crate::agents::assert_may_dispatch(&orch.db, run_id)
         .await
         .map_err(Refusal::Gated)?;
+    budget_allows(orch, run_id).await?;
     let updated = sqlx::query(
         "UPDATE runs SET plan_approved_at = now(), status = 'queued'
          WHERE id = $1 AND status = 'awaiting_approval'",

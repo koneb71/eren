@@ -25,7 +25,10 @@ use tokio::sync::mpsc;
 fn claude_args(spec: &RunSpec, mcp_config: Option<PathBuf>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "-p".into(),
-        spec.prompt.clone().into(),
+        // Through `positional`: a brief that opens with a markdown list item
+        // ("- fix the login") was read as a flag, and a one-word chat message
+        // can name a subcommand.
+        crate::positional(spec.prompt.clone()).into(),
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
@@ -134,6 +137,7 @@ impl Engine for ClaudeEngine {
             // directory, per run.
             mcp_tools: true,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 
@@ -318,6 +322,18 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_a_dash_is_not_a_flag() {
+        let mut s = spec();
+        s.prompt = "- fix the login\n- add a test".into();
+        let args = args_of(&s);
+        assert_eq!(args[0], "-p");
+        assert!(!args[1].starts_with('-'), "{:?}", args[1]);
+        assert_eq!(args[1].trim_start(), s.prompt);
+        // An ordinary prompt travels exactly as written.
+        assert_eq!(args_of(&spec())[1], "do the thing");
     }
 
     #[test]

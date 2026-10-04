@@ -315,7 +315,7 @@ pub(crate) struct AgentPatch {
 pub const HEARTBEATS: [i32; 4] = [300, 900, 3600, 14_400];
 
 /// Distinguish "field absent" from "field set to null" so clearing works.
-fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,
@@ -595,6 +595,7 @@ async fn generate(
     // Designing a team is the kind of one-shot judgement that repays
     // thinking time far more than it repays a bigger model.
     let output = utility_run(
+        &state.db,
         engine,
         model_id,
         prompt,
@@ -602,7 +603,7 @@ async fn generate(
         Duration::from_secs(180),
     )
     .await
-    .map_err(internal)?;
+    .map_err(super::run_refused)?;
     match extract_json(&output) {
         Ok(Value::Array(drafts)) => Ok(Json(json!({ "drafts": drafts }))),
         Ok(single @ Value::Object(_)) => Ok(Json(json!({ "drafts": [single] }))),

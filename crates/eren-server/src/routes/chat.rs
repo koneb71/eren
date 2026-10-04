@@ -491,7 +491,11 @@ struct SendBody {
     /// picker expresses going back to the default — `None` cannot mean that,
     /// because `None` is what a client sending only `content` sends.
     model_id: Option<String>,
-    effort: Option<ReasoningEffort>,
+    /// Absent leaves the chat's effort alone; `null` clears it back to the
+    /// default, which is how the picker says "default" — a plain `Option`
+    /// could not tell the two apart, so the choice could never be undone.
+    #[serde(default, deserialize_with = "super::agents::double_option")]
+    effort: Option<Option<ReasoningEffort>>,
     /// Propose rather than act. Sticks to the chat like the two above — plan
     /// mode is a mode you are in, not a property of one sentence.
     plan_mode: Option<bool>,
@@ -555,7 +559,7 @@ async fn send(
     {
         sqlx::query(
             "UPDATE chats SET model_tier = coalesce($2, model_tier),
-                              effort = coalesce($3, effort),
+                              effort = CASE WHEN $6 THEN $3 ELSE effort END,
                               plan_mode = coalesce($4, plan_mode),
                               -- NULLIF so an empty string clears the override
                               -- rather than saving a blank model id.
@@ -569,9 +573,10 @@ async fn send(
                 .and_then(|t| serde_json::to_value(t).ok())
                 .and_then(|v| v.as_str().map(str::to_string)),
         )
-        .bind(body.effort.map(|e| e.as_str().to_string()))
+        .bind(body.effort.flatten().map(|e| e.as_str().to_string()))
         .bind(body.plan_mode)
         .bind(body.model_id.as_deref().map(str::trim))
+        .bind(body.effort.is_some())
         .execute(&state.db.pool)
         .await
         .map_err(internal)?;
@@ -603,15 +608,34 @@ async fn send(
     // Attachments are project machinery: the files live under the project and
     // the claim binds them there. Refused rather than dropped, so the person
     // who dragged a screenshot in learns why it did not arrive.
+    //
+    // The message and the claim are one transaction: a refused attachment
+    // used to leave the question written with nothing attached and no run to
+    // answer it, and the client's retry wrote it a second time. A project
+    // chat's uploads belong to its project; a general chat's to its
+    // workspace, and the claim refuses one from anywhere else.
+    let home = match project_id {
+        Some(project_id) => attachments::Home::Project(project_id),
+        None => attachments::Home::Workspace(workspace_id),
+    };
+    let mut tx = state.db.pool.begin().await.map_err(internal)?;
     let row = sqlx::query(
         "INSERT INTO chat_messages (chat_id, role, content) VALUES ($1, 'user', $2) RETURNING id",
     )
     .bind(chat_id)
     .bind(body.content.trim())
-    .fetch_one(&state.db.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
     let message_id: Uuid = row.get("id");
+    attachments::claim_in(
+        &mut tx,
+        &body.attachment_ids,
+        home,
+        attachments::Owner::Message(message_id),
+    )
+    .await?;
+    tx.commit().await.map_err(internal)?;
 
     // Who the user named with `@`, decided from the agent library rather than
     // from anything the client sent. The dashboard parses the same text to draw
@@ -631,20 +655,6 @@ async fn send(
     eren_core::kb::record_for_message(&state.db, message_id, workspace_id, &body.article_ids)
         .await
         .map_err(internal)?;
-
-    // A project chat's uploads belong to its project; a general chat's to
-    // its workspace, and the claim refuses one from anywhere else.
-    let home = match project_id {
-        Some(project_id) => attachments::Home::Project(project_id),
-        None => attachments::Home::Workspace(workspace_id),
-    };
-    attachments::claim(
-        &state.db,
-        &body.attachment_ids,
-        home,
-        attachments::Owner::Message(message_id),
-    )
-    .await?;
 
     // Name the chat after its opening line, and float it to the top of the
     // list. Only untitled chats are renamed, so a user's own title sticks.

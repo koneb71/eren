@@ -3265,7 +3265,9 @@ export const api = {
       content,
       engine: opts.engine,
       model_tier: opts.modelTier,
-      effort: opts.effort ?? undefined,
+      // null clears the chat's effort back to the default; undefined (left
+      // out) leaves it as it was.
+      effort: opts.effort,
       plan_mode: opts.planMode,
       model_id: opts.modelId,
       attachment_ids: opts.attachmentIds ?? [],

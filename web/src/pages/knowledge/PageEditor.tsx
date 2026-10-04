@@ -5,6 +5,7 @@ import { RichTextEditor } from "../../components/kb/RichTextEditor";
 import { IconPicker } from "../../components/kb/IconPicker";
 import { DiffBody } from "../../components/kb/PendingRevisionBanner";
 import { KnowledgeContext } from "./KnowledgeLayout";
+import { readStored, removeStored, writeStored } from "../../lib/storage";
 import { Button } from "../../components/ui/Button";
 
 /**
@@ -22,7 +23,9 @@ type SaveState =
   | { kind: "idle" }
   | { kind: "saving" }
   | { kind: "saved" }
-  | { kind: "conflict"; diff: RevisionDiff | null }
+  // `kept`: whether the draft also made it into storage, so it survives a
+  // reload. Storage can refuse; the conflict is still shown either way.
+  | { kind: "conflict"; diff: RevisionDiff | null; kept: boolean }
   | { kind: "error"; message: string };
 
 const DEBOUNCE_MS = 1500;
@@ -63,9 +66,9 @@ export default function PageEditor() {
       baseVersion.current = p.bodyVersion;
       // A draft left by a refused save is restored rather than lost — a
       // conflict must never cost someone their typing.
-      const stashed = localStorage.getItem(DRAFT_KEY(p.id));
+      const stashed = readStored(DRAFT_KEY(p.id));
       setHtml(stashed ?? p.contentHtml ?? "");
-        if (stashed) setSave({ kind: "conflict", diff: null });
+        if (stashed) setSave({ kind: "conflict", diff: null, kept: true });
       })
       // Otherwise a page that fails to load sits on "Loading…" with no way to
       // tell whether it is slow, gone, or broken.
@@ -88,14 +91,14 @@ export default function PageEditor() {
       });
       baseSeq.current = updated.currentSeq;
       baseVersion.current = updated.bodyVersion;
-      localStorage.removeItem(DRAFT_KEY(pageId));
+      removeStored(DRAFT_KEY(pageId));
       setSave({ kind: "saved" });
       reload();
     } catch (e) {
       if (e instanceof ConflictError) {
         // Keep the work somewhere it survives a reload, then show what
         // actually changed underneath rather than a bare "try again".
-        localStorage.setItem(DRAFT_KEY(pageId), html);
+        const kept = writeStored(DRAFT_KEY(pageId), html);
         const fresh = await api.article(pageId).catch(() => null);
         const diff =
           fresh && fresh.currentSeq > baseSeq.current
@@ -103,7 +106,7 @@ export default function PageEditor() {
                 .revisionDiff(pageId, fresh.currentSeq, baseSeq.current)
                 .catch(() => null)
             : null;
-        setSave({ kind: "conflict", diff });
+        setSave({ kind: "conflict", diff, kept });
         return;
       }
       setSave({ kind: "error", message: String(e).replace(/^Error:\s*/, "") });
@@ -156,8 +159,9 @@ export default function PageEditor() {
               This page changed while you were editing
             </div>
             <p className="mt-1 text-xs text-fg">
-              Your version is safe — it is still in the editor below and will
-              survive a reload.{" "}
+              {save.kept
+                ? "Your version is safe — it is still in the editor below and will survive a reload. "
+                : "Your version is still in the editor below, but this browser would not keep a copy, so it will not survive a reload. "}
               {save.diff
                 ? "Here is what changed underneath it."
                 : // No diff when the other save folded into the revision this
@@ -191,7 +195,7 @@ export default function PageEditor() {
               <Button
                 size="sm"
                 onClick={() => {
-                  localStorage.removeItem(DRAFT_KEY(page.id));
+                  removeStored(DRAFT_KEY(page.id));
                   window.location.reload();
                 }}
               >

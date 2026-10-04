@@ -27,6 +27,8 @@ export interface WorkflowMeta {
   description?: string;
   schedule?: string;
   engine?: string;
+  /** `defaults.model`: tier name or literal model id for every step that names none. */
+  model?: string;
   permissionMode?: string;
 }
 
@@ -75,6 +77,7 @@ export function parseWorkflow(yaml: string): ParsedWorkflow {
       description: asString(raw.description),
       schedule: asString(raw.on?.schedule),
       engine: asString(defaults.engine),
+      model: asString(defaults.model),
       permissionMode: asString(defaults.permission_mode ?? defaults.permissionMode),
     },
     steps,
@@ -101,6 +104,7 @@ export function emitWorkflow(meta: WorkflowMeta, steps: StepData[]): string {
 
   const defaults: string[] = [];
   if (meta.engine) defaults.push(`  engine: ${meta.engine}`);
+  if (meta.model) defaults.push(`  model: ${scalar(meta.model)}`);
   if (meta.permissionMode) defaults.push(`  permission_mode: ${meta.permissionMode}`);
   if (defaults.length) lines.push("defaults:", ...defaults);
 
@@ -119,8 +123,15 @@ export function emitWorkflow(meta: WorkflowMeta, steps: StepData[]): string {
       lines.push(`    strategy: { ${parts.join(", ")} }`);
     }
     // Prompt last: it's the tallest field, so diffs stay readable.
-    lines.push("    prompt: |");
-    for (const line of (step.prompt || "").split("\n")) {
+    //
+    // A block scalar guesses its indentation from its first non-empty line,
+    // so a prompt that opens indented (a code sample, a quoted list) would
+    // lose those spaces — or, if a later line is indented less, be invalid
+    // YAML. Then the indentation is said outright: `|2` is two past the step
+    // mapping's four, the six every line below is written at.
+    const body = (step.prompt || "").split("\n");
+    lines.push(body.some((l) => l.startsWith(" ")) ? "    prompt: |2" : "    prompt: |");
+    for (const line of body) {
       lines.push(line ? `      ${line}` : "");
     }
   }

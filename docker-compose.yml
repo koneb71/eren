@@ -50,12 +50,13 @@ services:
     ports:
       # 5433 on the host so a local Postgres on 5432 keeps working.
       #
-      # Every port here is published on 127.0.0.1 only. Docker's default is
-      # every interface, which put this database — default password and all —
-      # on the network of anyone who followed the one-line setup. Whoever can
-      # write to it can register an MCP server or an attention hook, both of
-      # which Eren runs as commands.
-      - "0.0.0.0:${POSTGRES_PORT:-5433}:5432"
+      # Published on 127.0.0.1 only, as is storage below — only the dashboard
+      # is published wider. Docker's default is every interface, which put
+      # this database — default password and all — on the network of anyone
+      # who followed the one-line setup. Whoever can write to it can register
+      # an MCP server or an attention hook, both of which Eren runs as
+      # commands, and no access token or account stands in front of it.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - aichip-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -88,8 +89,8 @@ services:
     ports:
       # 9100/9101 on the host, so an S3 server you already run on 9000 keeps
       # working. MINIO_* are the names these had before.
-      - "0.0.0.0:${S3_PORT:-${MINIO_PORT:-9100}}:9000"
-      - "0.0.0.0:${S3_CONSOLE_PORT:-${MINIO_CONSOLE_PORT:-9101}}:9001"
+      - "127.0.0.1:${S3_PORT:-${MINIO_PORT:-9100}}:9000"
+      - "127.0.0.1:${S3_CONSOLE_PORT:-${MINIO_CONSOLE_PORT:-9101}}:9001"
     volumes:
       # A new volume, not MinIO's `aichip-minio`: that holds MinIO's own
       # on-disk format. It is left exactly as it was — see README.md for
@@ -134,21 +135,22 @@ services:
       # Your code, at the same path inside and out — see the volume below.
       EREN_BROWSE_ROOT: ${EREN_PROJECTS_DIR:-${AICHIP_PROJECTS_DIR:-/workspace}}
       EREN_MAX_CONCURRENT: ${EREN_MAX_CONCURRENT:-${AICHIP_MAX_CONCURRENT:-2}}
-      # Off by default here: the port below is published on the host's
-      # loopback only, so the one browser that can reach it is yours, and it
-      # arrives through Docker's gateway rather than from 127.0.0.1 — which
-      # the token would otherwise ask to sign in. Publish the port wider and
-      # leave this unset, and every other device needs Eren's access link.
-      EREN_ACCESS_TOKEN: ${EREN_ACCESS_TOKEN:-off}
+      # On by default, because the port below is published on every
+      # interface. Every browser — yours included, since it arrives through
+      # Docker's gateway rather than from 127.0.0.1 — opens Eren's access link
+      # once: `docker compose logs eren | grep "open this link"`. The token is
+      # kept in the state volume, so the link survives a redeploy. Set this to
+      # `off` only together with EREN_PUBLISH_IP=127.0.0.1.
+      EREN_ACCESS_TOKEN: ${EREN_ACCESS_TOKEN:-}
       EREN_ALLOWED_HOSTS: ${EREN_ALLOWED_HOSTS:-}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
-      # Loopback on the host unless EREN_PUBLISH_IP says otherwise, whatever
-      # the container binds inside. To reach it from other devices, set
-      # EREN_PUBLISH_IP=0.0.0.0 and EREN_ALLOWED_HOSTS to the address you use,
-      # and turn accounts on (`docker compose exec eren eren admin create
-      # --username <name>`) so every browser signs in — without them, anyone
-      # who can reach the port can drive it.
+      # Every interface unless EREN_PUBLISH_IP says otherwise, so other
+      # devices can reach it; the access token above is what stands in front
+      # of it. Set EREN_ALLOWED_HOSTS to the address you use from them, and
+      # turn accounts on (`docker compose exec eren eren admin create
+      # --username <name>`) if more than one person will use it. To keep it
+      # to this machine, set EREN_PUBLISH_IP=127.0.0.1.
       - "${EREN_PUBLISH_IP:-0.0.0.0}:${EREN_PORT:-${AICHIP_PORT:-4820}}:4820"
     volumes:
       # Mounted at the *same absolute path* on both sides. A git worktree

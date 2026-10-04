@@ -116,10 +116,12 @@ unauthenticated agent runner is a decision rather than a side effect.
 The container image sets `EREN_BIND=0.0.0.0` and `EREN_TRUST_NETWORK=1`, because inside a
 container the port is only reachable through an explicit mapping, and the host's browser
 arrives through Docker's gateway rather than from loopback. `docker-compose.yml` therefore
-publishes every port — Eren's, Postgres's and the object store's — on `127.0.0.1` only, and sets
-`EREN_ACCESS_TOKEN=off` for Eren. Docker's default is every interface; if you remove the
-`127.0.0.1:`, leave the token on, or you are publishing an unauthenticated agent runner — and
-either way a database with a default password.
+publishes Postgres and the object store on `127.0.0.1` only — neither has anything in front of
+it but a default password, and whoever can write to the database can register a command Eren
+runs — and publishes Eren's dashboard on every interface (`EREN_PUBLISH_IP`) with the access
+token **on**, so every browser, the host's included, needs the access link. Turning the token
+off (`EREN_ACCESS_TOKEN=off`) is safe only together with `EREN_PUBLISH_IP=127.0.0.1`; otherwise
+you are publishing an unauthenticated agent runner.
 
 `docker-compose.previews.yml` is the one Docker setting that widens what an agent can do, and
 it is opt-in for that reason: it mounts the host's Docker socket into Eren's container so
@@ -176,8 +178,10 @@ in the same filesystem, with the same database credentials in reach. An account 
 an agent with a shell — Full Auto on its own project, or `/ws/terminal` — can read other
 accounts' checkouts and worktrees, and through the database password everything else. Accounts
 separate people who are cooperating; they are not a boundary against one who is not. Preview
-and app hostnames (`*.preview.localhost`, `*.app.localhost`) are reachable only from this
-machine and are not tied to an account.
+and app hostnames (`*.preview.localhost`, `*.app.localhost`), and an app's bridge, answer a
+loopback peer — this machine, not tied to an account — or a signed-in account whose workspace
+holds them; from anywhere else, with no session, they answer 401 whatever the `Host` header
+claims (`preview_proxy::gate`, decided by the peer address).
 
 Apart from that, Eren is not hardened as a multi-tenant service. Without accounts, the
 workspace/team structures in the data model are organisational, not a security boundary. Do not
@@ -234,6 +238,10 @@ and the skills installer alike. Each key is read under two names, so `own_secret
 both: `EREN_S3_ACCESS_KEY`, `EREN_S3_SECRET_KEY`, and the pre-rename `AICHIP_S3_ACCESS_KEY` and
 `AICHIP_S3_SECRET_KEY` that Eren still reads. A test also checks that everything Eren owns reads
 as a secret to `is_auth_env`, so it can never be handed back through a run's extra variables.
+`DATABASE_URL` is stripped too (`OWN_UNPREFIXED`, under that one name): it is the database Eren
+itself runs on, password included, and a project's test suite run as a check would otherwise
+point its fixtures at it. Nothing Eren starts needs it. It is not auth-shaped, so a person may
+still give an MCP server a database of its own.
 
 That list is deliberately narrow. Your own provider variables are yours and are left alone,
 because OpenCode authenticates some providers from the environment on purpose, and Amp's

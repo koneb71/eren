@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Agent, api, ChatSummary, Project } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
+import { readStored, writeStored } from "../lib/storage";
 import { NARROW, useMediaQuery } from "../lib/useMediaQuery";
 import { ChatThread } from "../components/chat/ChatThread";
 import { SpaceDocs } from "../components/chat/SpaceDocs";
@@ -30,6 +31,10 @@ export default function ChatPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [chats, setChats] = useState<ChatSummary[]>([]);
+  // Only the newest list request may land: one that left before a switch of
+  // project (or before a later refresh) would otherwise fill the rail with
+  // another scope's conversations, or an older view of this one.
+  const chatsGen = useRef(0);
   const [chatId, setChatId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -51,7 +56,7 @@ export default function ChatPage() {
       .then((r) => {
         setProjects(r.projects);
         const fromUrl = params.get("project");
-        const remembered = localStorage.getItem(PROJECT_KEY);
+        const remembered = readStored(PROJECT_KEY);
         // "general" is the default: a conversation does not need a project,
         // so opening the page fresh should not pretend it does.
         const pick =
@@ -77,8 +82,9 @@ export default function ChatPage() {
   const pickProject = (id: string) => {
     setProjectId(id);
     setChatId(null);
+    chatsGen.current++;
     setChats([]);
-    localStorage.setItem(PROJECT_KEY, id);
+    writeStored(PROJECT_KEY, id);
     setParams({ project: id }, { replace: true });
   };
 
@@ -98,13 +104,18 @@ export default function ChatPage() {
   const general = projectId === GENERAL;
   const refreshChats = useCallback(() => {
     if (!projectId) return Promise.resolve();
+    const gen = ++chatsGen.current;
     const list =
       projectId === GENERAL
         ? workspaceId
           ? api.generalChats(workspaceId)
           : Promise.resolve({ chats: [] })
         : api.chats(projectId);
-    return list.then((r) => setChats(r.chats)).catch(() => {});
+    return list
+      .then((r) => {
+        if (gen === chatsGen.current) setChats(r.chats);
+      })
+      .catch(() => {});
   }, [projectId, workspaceId]);
 
   // Which scope the open thread belongs to. The guard is what stops a

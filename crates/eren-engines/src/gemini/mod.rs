@@ -188,6 +188,7 @@ impl Engine for GeminiEngine {
             enforces_denied_tools: false,
             mcp_tools: false,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 

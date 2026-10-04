@@ -119,6 +119,8 @@ impl Engine for CursorEngine {
             enforces_denied_tools: false,
             mcp_tools: false,
             auto_edit: false,
+            // `--mode ask` reads and answers, and nothing in it can write.
+            read_only_passes: true,
         }
     }
 

@@ -339,6 +339,14 @@ async fn chat_project(state: &AppState, chat_id: Uuid) -> Result<(Uuid, Uuid, St
     ))
 }
 
+/// Why `name` may not run while the chat is planning, if it may not.
+fn plan_refusal(name: &str, planning: bool) -> Option<&'static str> {
+    (planning && eren_core::runs::chat_plan::ACTING_TOOL_NAMES.contains(&name)).then_some(
+        "this chat is in plan mode — propose the plan instead; a person approves it \
+         before any card is created, started, moved or cancelled",
+    )
+}
+
 async fn call_tool(
     state: &AppState,
     chat_id: Uuid,
@@ -367,6 +375,20 @@ async fn call_tool(
         return Err(
             "this chat's project is a repository — the document tools work in spaces".into(),
         );
+    }
+    // Plan mode, enforced here as well as by the run's `denied_tools`: Codex,
+    // OpenCode and Qwen are handed this server but do not apply a denial to
+    // its tools, so on them the toolbox is the only gate there is. Read
+    // strictly — unlike `planning`, a lookup failure refuses.
+    if eren_core::runs::chat_plan::ACTING_TOOL_NAMES.contains(&name) {
+        let planning: bool = sqlx::query_scalar("SELECT plan_mode FROM chats WHERE id = $1")
+            .bind(chat_id)
+            .fetch_one(&state.db.pool)
+            .await
+            .map_err(|e| format!("could not tell whether this chat is planning: {e}"))?;
+        if let Some(refusal) = plan_refusal(name, planning) {
+            return Err(refusal.into());
+        }
     }
     match name {
         "create_task" => {
@@ -1272,6 +1294,18 @@ mod tests {
         let offered: std::collections::HashSet<String> =
             planning.iter().map(|n| format!("mcp__eren__{n}")).collect();
         assert_eq!(offered, allowed);
+    }
+
+    #[test]
+    fn planning_refuses_every_acting_tool_at_the_call() {
+        for name in eren_core::runs::chat_plan::ACTING_TOOL_NAMES {
+            let refusal = plan_refusal(name, true).expect("refused while planning");
+            assert!(refusal.contains("plan mode"), "{refusal}");
+            assert!(plan_refusal(name, false).is_none(), "{name} acting");
+        }
+        for name in ["list_tasks", "ask_user", "search_kb"] {
+            assert!(plan_refusal(name, true).is_none(), "{name}");
+        }
     }
 
     /// A space has nothing to take away, so plan mode must not change it.

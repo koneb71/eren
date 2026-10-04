@@ -57,6 +57,7 @@ impl Engine for MockEngine {
             enforces_denied_tools: true,
             mcp_tools: true,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 

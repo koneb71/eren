@@ -5,7 +5,12 @@ use rand::Rng;
 /// burst of queued runs doesn't stampede the moment the window resets.
 pub fn rate_limit_backoff(attempt: u32, reset_at: Option<DateTime<Utc>>) -> DateTime<Utc> {
     let jitter = Duration::seconds(rand::rng().random_range(5..90));
-    match reset_at {
+    // A reset time already behind us says nothing about when the limit
+    // lifts — the engine's clock, a stale header, a window that turned while
+    // the stream was still ending. Honoured, it re-dispatched the run within
+    // seconds into the same limit, and every hold counted towards a ladder
+    // that was never climbed.
+    match reset_at.filter(|t| *t > Utc::now()) {
         Some(t) => t + jitter,
         None => {
             let minutes = match attempt {
@@ -48,6 +53,16 @@ mod tests {
         let reset = Utc::now() + Duration::hours(2);
         let t = rate_limit_backoff(0, Some(reset));
         assert!(t > reset && t < reset + Duration::minutes(2));
+    }
+
+    #[test]
+    fn a_reset_time_in_the_past_falls_back_to_the_ladder() {
+        let now = Utc::now();
+        let stale = now - Duration::minutes(10);
+        let first = rate_limit_backoff(0, Some(stale)) - now;
+        assert!(first >= Duration::minutes(5) && first < Duration::minutes(7));
+        let third = rate_limit_backoff(2, Some(stale)) - now;
+        assert!(third >= Duration::minutes(45) && third < Duration::minutes(47));
     }
 
     #[test]

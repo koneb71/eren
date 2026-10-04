@@ -17,13 +17,32 @@
 //! are `NOT NULL`, because it is Eren that fills them.
 
 use super::manifest::{FieldType, Model, RESERVED_FIELDS};
+use sha2::{Digest, Sha256};
 
 /// A table as Postgres currently has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveTable {
     pub name: String,
     pub columns: Vec<LiveColumn>,
-    pub indexes: Vec<String>,
+    pub indexes: Vec<LiveIndex>,
+    pub foreign_keys: Vec<LiveForeignKey>,
+}
+
+/// An index that is not a constraint's own (the primary key's is not one a
+/// manifest asks for).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveIndex {
+    pub name: String,
+    /// The column, for an index on exactly one; `None` for anything wider.
+    pub column: Option<String>,
+}
+
+/// A single-column foreign key, and the table it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveForeignKey {
+    pub name: String,
+    pub column: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,21 +103,92 @@ pub fn live_type_of(ty: &FieldType) -> &'static str {
     }
 }
 
+/// The longest name Postgres keeps. A longer one is cut to this many bytes
+/// without a word, so `CREATE INDEX` reports success under a name nobody
+/// asked for — which no longer ends in `_idx`, and two long names can come out
+/// the same, the second `IF NOT EXISTS` then quietly doing nothing.
+const MAX_IDENT: usize = 63;
+
+/// The name Eren gives an index or key on one field.
+///
+/// Unchanged wherever it fits, so an app whose names always fitted sees no
+/// difference. A longer one keeps its suffix and gives up the middle to a
+/// short hash of the whole name, which is what keeps two of them apart.
+fn object_name(model: &str, field: &str, suffix: &str) -> String {
+    let full = format!("{model}_{field}_{suffix}");
+    if full.len() <= MAX_IDENT {
+        return full;
+    }
+    let digest = Sha256::digest(full.as_bytes());
+    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    // Every manifest identifier is ASCII (see `manifest::ident`), so cutting
+    // at a byte count cannot split a character.
+    let keep = MAX_IDENT - hash.len() - suffix.len() - 2;
+    format!("{}_{hash}_{suffix}", &full[..keep])
+}
+
+/// What Postgres named it before [`object_name`] shortened long names
+/// itself: the first 63 bytes. `None` where the name always fitted.
+fn truncated_name(model: &str, field: &str, suffix: &str) -> Option<String> {
+    let full = format!("{model}_{field}_{suffix}");
+    (full.len() > MAX_IDENT).then(|| full[..MAX_IDENT].to_string())
+}
+
 fn index_name(model: &str, field: &str) -> String {
-    format!("{model}_{field}_idx")
+    object_name(model, field, "idx")
+}
+
+fn fk_name(model: &str, field: &str) -> String {
+    object_name(model, field, "fk")
+}
+
+/// Whether an index is one the manifest's `indexes` speak for, and so one the
+/// planner may drop: Eren's spelling, or what Postgres made of a long one.
+fn is_managed_index(model: &str, name: &str) -> bool {
+    name.ends_with("_idx") || (name.len() == MAX_IDENT && name.starts_with(&format!("{model}_")))
 }
 
 /// Reconcile a schema with what a manifest declares.
 ///
 /// Ordered so it can be run top to bottom in one transaction: the schema, then
-/// every table, then the foreign keys. Keys come last because a `ref:` may
-/// point at a model declared after it, and a manifest's legality should not
-/// depend on the order someone happened to write it in.
+/// the foreign keys the manifest no longer wants, then every table, then the
+/// keys it does. Unwanted keys go first because Postgres will not change a
+/// column's type while a key holds it; wanted ones come last because a `ref:`
+/// may point at a model declared after it, and a manifest's legality should
+/// not depend on the order someone happened to write it in.
 pub fn plan(schema: &str, models: &[Model], live: &[LiveTable]) -> Vec<Stmt> {
     let mut out = vec![Stmt::safe(
         format!("CREATE SCHEMA IF NOT EXISTS {}", q(schema)),
         format!("Make room for this app's tables in a schema of its own ({schema})."),
     )];
+
+    // A key on a field that is no longer a `ref:`, or now points elsewhere.
+    // Dropping one changes no value — it only stops checking them. A table
+    // about to be dropped is left to its own CASCADE.
+    for table in live {
+        let Some(model) = models.iter().find(|m| m.name == table.name) else {
+            continue;
+        };
+        for key in &table.foreign_keys {
+            let wanted = model.fields.iter().any(|f| {
+                f.name == key.column && matches!(&f.ty, FieldType::Ref(t) if *t == key.target)
+            });
+            if !wanted {
+                out.push(Stmt::safe(
+                    format!(
+                        "ALTER TABLE {}.{} DROP CONSTRAINT IF EXISTS {}",
+                        q(schema),
+                        q(&table.name),
+                        q(&key.name)
+                    ),
+                    format!(
+                        "Stop requiring \"{}\" to point at a row in \"{}\". No values change.",
+                        key.column, key.target
+                    ),
+                ));
+            }
+        }
+    }
 
     for model in models {
         let table = live.iter().find(|t| t.name == model.name);
@@ -130,32 +220,65 @@ pub fn plan(schema: &str, models: &[Model], live: &[LiveTable]) -> Vec<Stmt> {
     }
 
     for model in models {
+        let table = live.iter().find(|t| t.name == model.name);
         for field in &model.fields {
-            if let FieldType::Ref(target) = &field.ty {
-                let already = live
+            let FieldType::Ref(target) = &field.ty else {
+                continue;
+            };
+            // Asked of Postgres, not inferred from the column being there: a
+            // field that became a `ref:`, or changed what it points at, has
+            // the column already and still needs its key.
+            let keyed = table.is_some_and(|t| {
+                t.foreign_keys
                     .iter()
-                    .find(|t| t.name == model.name)
-                    .is_some_and(|t| t.columns.iter().any(|c| c.name == field.name));
-                if !already {
-                    out.push(Stmt::safe(
-                        format!(
-                            "ALTER TABLE {}.{} ADD CONSTRAINT {} FOREIGN KEY ({}) \
-                             REFERENCES {}.{}(id) ON DELETE SET NULL",
-                            q(schema),
-                            q(&model.name),
-                            q(&format!("{}_{}_fk", model.name, field.name)),
-                            q(&field.name),
-                            q(schema),
-                            q(target)
-                        ),
-                        format!(
-                            "Point \"{}\" at a row in \"{target}\", and clear it if that \
-                             row is deleted.",
-                            field.name
-                        ),
-                    ));
-                }
+                    .any(|k| k.column == field.name && k.target == *target)
+            });
+            if keyed {
+                continue;
             }
+            // A column that already holds values may hold some that are not
+            // ids in the target — every one of them, for a key that moved to
+            // another model — and the key cannot be added over them. They are
+            // cleared first, which loses them, so that is a question. A
+            // column created in this same plan holds nothing yet.
+            let has_values = table.is_some_and(|t| t.columns.iter().any(|c| c.name == field.name));
+            if has_values {
+                out.push(Stmt::destroys(
+                    format!(
+                        "UPDATE {}.{} AS t SET {} = NULL WHERE t.{} IS NOT NULL \
+                         AND NOT EXISTS (SELECT 1 FROM {}.{} AS r WHERE r.id = t.{})",
+                        q(schema),
+                        q(&model.name),
+                        q(&field.name),
+                        q(&field.name),
+                        q(schema),
+                        q(target),
+                        q(&field.name)
+                    ),
+                    format!(
+                        "Clear every \"{}\" in \"{}\" that does not point at a row in \
+                         \"{target}\". Those values are lost.",
+                        field.name, model.name
+                    ),
+                ));
+            }
+            out.push(Stmt::safe(
+                format!(
+                    "ALTER TABLE {}.{} ADD CONSTRAINT {} FOREIGN KEY ({}) \
+                     REFERENCES {}.{}(id) ON DELETE SET NULL",
+                    q(schema),
+                    q(&model.name),
+                    q(&fk_name(&model.name, &field.name)),
+                    q(&field.name),
+                    q(schema),
+                    q(target)
+                ),
+                format!(
+                    "Point \"{}\" at a row in \"{target}\", and clear it if that \
+                     row is deleted.",
+                    field.name
+                ),
+            ));
         }
     }
 
@@ -248,34 +371,62 @@ fn alter_table(schema: &str, model: &Model, live: &LiveTable, out: &mut Vec<Stmt
 /// `live` is `None` when the table is being created in this same plan, which is
 /// why this is not part of `alter_table`.
 fn reconcile_indexes(schema: &str, model: &Model, live: Option<&LiveTable>, out: &mut Vec<Stmt>) {
-    let existing: &[String] = live.map_or(&[], |t| t.indexes.as_slice());
+    let existing: &[LiveIndex] = live.map_or(&[], |t| t.indexes.as_slice());
+    // Every existing index a declared one accounts for; the rest of the
+    // managed ones are dropped below.
+    let mut kept: Vec<&str> = Vec::new();
 
     for field in &model.indexes {
         let name = index_name(&model.name, field);
-        if !existing.contains(&name) {
+        if let Some(found) = existing.iter().find(|i| i.name == name) {
+            kept.push(&found.name);
+            continue;
+        }
+        // Made before long names were shortened here, so Postgres cut it. It
+        // is renamed rather than rebuilt — but only if it really is on this
+        // field: two long names could be cut to the same one, and then the
+        // index belongs to whichever field claimed the name first.
+        let cut = truncated_name(&model.name, field, "idx");
+        if let Some(found) = existing
+            .iter()
+            .find(|i| Some(&i.name) == cut.as_ref() && i.column.as_deref() == Some(field.as_str()))
+        {
+            kept.push(&found.name);
             out.push(Stmt::safe(
                 format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
-                    q(&name),
+                    "ALTER INDEX {}.{} RENAME TO {}",
                     q(schema),
-                    q(&model.name),
-                    q(field)
+                    q(&found.name),
+                    q(&name)
                 ),
-                format!("Make looking up \"{}\" by \"{field}\" fast.", model.name),
+                format!(
+                    "Rename the \"{}\" index to \"{name}\", which Postgres keeps whole. No \
+                     rows are affected.",
+                    found.name
+                ),
             ));
+            continue;
         }
+        out.push(Stmt::safe(
+            format!(
+                "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
+                q(&name),
+                q(schema),
+                q(&model.name),
+                q(field)
+            ),
+            format!("Make looking up \"{}\" by \"{field}\" fast.", model.name),
+        ));
     }
-    for name in existing {
-        let wanted = model
-            .indexes
-            .iter()
-            .any(|f| &index_name(&model.name, f) == name);
-        if !wanted {
-            out.push(Stmt::safe(
-                format!("DROP INDEX IF EXISTS {}.{}", q(schema), q(name)),
-                format!("Drop the \"{name}\" index. No rows are affected."),
-            ));
+    for index in existing {
+        if kept.contains(&index.name.as_str()) || !is_managed_index(&model.name, &index.name) {
+            continue;
         }
+        let name = &index.name;
+        out.push(Stmt::safe(
+            format!("DROP INDEX IF EXISTS {}.{}", q(schema), q(name)),
+            format!("Drop the \"{name}\" index. No rows are affected."),
+        ));
     }
 }
 
@@ -334,6 +485,7 @@ mod tests {
                 },
             ],
             indexes: vec![],
+            foreign_keys: vec![],
         }]
     }
 
@@ -472,6 +624,7 @@ mod tests {
                 data_type: "timestamp with time zone".into(),
             }],
             indexes: vec![],
+            foreign_keys: vec![],
         }];
         let plan = plan("app_t", &m, &live);
         assert!(
@@ -519,7 +672,10 @@ mod tests {
         assert!(added.iter().any(|s| s.sql.contains("CREATE INDEX")));
 
         let mut live = live_expense();
-        live[0].indexes = vec!["expense_note_idx".into()];
+        live[0].indexes = vec![LiveIndex {
+            name: "expense_note_idx".into(),
+            column: Some("note".into()),
+        }];
         let removed = plan("app_t", &models(ONE), &live);
         assert!(!needs_approval(&removed), "an index holds no data");
         assert!(removed.iter().any(|s| s.sql.contains("DROP INDEX")));
@@ -548,6 +704,213 @@ mod tests {
         );
         assert!(plan[fk].sql.contains("REFERENCES \"app_t\".\"order\"(id)"));
         assert!(!needs_approval(&plan));
+    }
+
+    fn col(name: &str, data_type: &str) -> LiveColumn {
+        LiveColumn {
+            name: name.into(),
+            data_type: data_type.into(),
+        }
+    }
+
+    /// `line.order_id` as Postgres has it, keyed to `target` (or not at all),
+    /// beside two tables it could point at.
+    fn live_line(target: Option<&str>, order_id_type: &str) -> Vec<LiveTable> {
+        let table = |name: &str, extra: Vec<LiveColumn>, keys: Vec<LiveForeignKey>| LiveTable {
+            name: name.into(),
+            columns: [
+                vec![
+                    col("id", "uuid"),
+                    col("created_at", "timestamp with time zone"),
+                    col("updated_at", "timestamp with time zone"),
+                ],
+                extra,
+            ]
+            .concat(),
+            indexes: vec![],
+            foreign_keys: keys,
+        };
+        vec![
+            table(
+                "line",
+                vec![col("order_id", order_id_type)],
+                target
+                    .map(|t| LiveForeignKey {
+                        name: "line_order_id_fk".into(),
+                        column: "order_id".into(),
+                        target: t.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+            ),
+            table("order", vec![col("total", "numeric")], vec![]),
+            table("customer", vec![col("total", "numeric")], vec![]),
+        ]
+    }
+
+    fn line_manifest(order_id: &str) -> Vec<Model> {
+        models(&format!(
+            "name: T\nmodels:\n  line:\n    fields:\n      order_id: {{ type: \"{order_id}\" }}\n  \
+             order:\n    fields:\n      total: {{ type: decimal }}\n  \
+             customer:\n    fields:\n      total: {{ type: decimal }}\n"
+        ))
+    }
+
+    #[test]
+    fn a_key_that_is_already_there_is_left_alone() {
+        let plan = plan(
+            "app_t",
+            &line_manifest("ref:order"),
+            &live_line(Some("order"), "uuid"),
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|s| s.sql.contains("CONSTRAINT") || s.sql.contains("UPDATE")),
+            "{plan:#?}"
+        );
+    }
+
+    #[test]
+    fn a_field_that_becomes_a_ref_gets_its_key_after_a_question() {
+        // The column is there already, so the old "add the key with the
+        // column" rule never added one.
+        let plan = plan(
+            "app_t",
+            &line_manifest("ref:order"),
+            &live_line(None, "text"),
+        );
+        assert!(needs_approval(&plan));
+        let retype = plan
+            .iter()
+            .position(|s| s.sql.contains("ALTER COLUMN"))
+            .unwrap();
+        let clear = plan
+            .iter()
+            .position(|s| s.sql.starts_with("UPDATE"))
+            .unwrap();
+        let key = plan
+            .iter()
+            .position(|s| s.sql.contains("FOREIGN KEY"))
+            .unwrap();
+        assert!(retype < clear && clear < key, "{plan:#?}");
+        assert!(plan[clear].destructive);
+        assert!(plan[clear].sql.contains("FROM \"app_t\".\"order\" AS r"));
+        assert!(plan[key].sql.contains("REFERENCES \"app_t\".\"order\"(id)"));
+    }
+
+    #[test]
+    fn a_ref_that_points_elsewhere_moves_its_key() {
+        let plan = plan(
+            "app_t",
+            &line_manifest("ref:customer"),
+            &live_line(Some("order"), "uuid"),
+        );
+        assert!(needs_approval(&plan), "the old ids are not customers");
+        let drop = plan
+            .iter()
+            .position(|s| {
+                s.sql
+                    .contains("DROP CONSTRAINT IF EXISTS \"line_order_id_fk\"")
+            })
+            .unwrap();
+        let key = plan
+            .iter()
+            .position(|s| s.sql.contains("FOREIGN KEY"))
+            .unwrap();
+        assert!(drop < key);
+        assert!(!plan[drop].destructive, "dropping a key changes no value");
+        assert!(plan[key]
+            .sql
+            .contains("REFERENCES \"app_t\".\"customer\"(id)"));
+    }
+
+    #[test]
+    fn a_ref_that_stops_being_one_loses_its_key_before_its_type_changes() {
+        // Postgres refuses to retype a column a key still holds.
+        let plan = plan(
+            "app_t",
+            &line_manifest("text"),
+            &live_line(Some("order"), "uuid"),
+        );
+        let drop = plan
+            .iter()
+            .position(|s| s.sql.contains("DROP CONSTRAINT"))
+            .unwrap();
+        let retype = plan
+            .iter()
+            .position(|s| s.sql.contains("ALTER COLUMN"))
+            .unwrap();
+        assert!(drop < retype, "{plan:#?}");
+        assert!(!plan.iter().any(|s| s.sql.contains("FOREIGN KEY")));
+    }
+
+    const LONG_MODEL: &str = "a_model_name_that_uses_most_of_the_forty_eight_c";
+
+    #[test]
+    fn a_long_name_fits_postgres_and_two_of_them_stay_apart() {
+        assert_eq!(LONG_MODEL.len(), 48);
+        let a = index_name(LONG_MODEL, "description_long_first");
+        let b = index_name(LONG_MODEL, "description_long_second");
+        for name in [&a, &b] {
+            assert!(name.len() <= MAX_IDENT, "{name} is {} bytes", name.len());
+            assert!(name.ends_with("_idx"), "{name}");
+        }
+        // Cut to 63 bytes, these two were the same name.
+        assert_eq!(
+            truncated_name(LONG_MODEL, "description_long_first", "idx"),
+            truncated_name(LONG_MODEL, "description_long_second", "idx")
+        );
+        assert_ne!(a, b);
+        // And a name that always fitted is the name it always had.
+        assert_eq!(index_name("expense", "note"), "expense_note_idx");
+        assert_eq!(fk_name("line", "order_id"), "line_order_id_fk");
+    }
+
+    #[test]
+    fn an_index_postgres_cut_short_is_renamed_not_rebuilt() {
+        let m = models(&format!(
+            "name: T\nmodels:\n  {LONG_MODEL}:\n    fields:\n      description_long_first: {{ type: text }}\n      \
+             description_long_second: {{ type: text }}\n    indexes: [description_long_first, description_long_second]\n"
+        ));
+        let cut = truncated_name(LONG_MODEL, "description_long_first", "idx").unwrap();
+        let live = vec![LiveTable {
+            name: LONG_MODEL.into(),
+            columns: vec![
+                col("id", "uuid"),
+                col("created_at", "timestamp with time zone"),
+                col("updated_at", "timestamp with time zone"),
+                col("description_long_first", "text"),
+                col("description_long_second", "text"),
+            ],
+            // The one index the two cut names made, on the field that got
+            // there first; the second's `IF NOT EXISTS` did nothing.
+            indexes: vec![LiveIndex {
+                name: cut.clone(),
+                column: Some("description_long_first".into()),
+            }],
+            foreign_keys: vec![],
+        }];
+        let plan = plan("app_t", &m, &live);
+        assert!(!needs_approval(&plan));
+        let renames: Vec<_> = plan
+            .iter()
+            .filter(|s| s.sql.starts_with("ALTER INDEX"))
+            .collect();
+        assert_eq!(renames.len(), 1, "{plan:#?}");
+        assert!(renames[0].sql.ends_with(&format!(
+            "RENAME TO \"{}\"",
+            index_name(LONG_MODEL, "description_long_first")
+        )));
+        let creates: Vec<_> = plan
+            .iter()
+            .filter(|s| s.sql.starts_with("CREATE INDEX"))
+            .collect();
+        assert_eq!(creates.len(), 1, "{plan:#?}");
+        assert!(creates[0]
+            .sql
+            .contains(&index_name(LONG_MODEL, "description_long_second")));
+        assert!(!plan.iter().any(|s| s.sql.starts_with("DROP INDEX")));
     }
 
     #[test]

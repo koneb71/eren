@@ -8,6 +8,7 @@ import { RulesSettings } from "../components/RulesSettings";
 import { Page, PageHead } from "../components/ui/Surface";
 import { Icon } from "../components/ui/Icon";
 import { Button } from "../components/ui/Button";
+import { toast } from "../components/ui/Toast";
 import { tappable } from "../lib/motion";
 
 /**
@@ -113,6 +114,41 @@ export default function SettingsPage() {
       ),
     );
 
+  // These switches show the choice at once and then ask the server, which can
+  // say no (with accounts on, only the admin changes machine settings). A
+  // refusal puts the old value back — unless a later click already moved it —
+  // and says why, rather than leaving a choice on screen that never took.
+  const refused = (what: string, e: unknown) =>
+    toast(`Could not change ${what}`, {
+      tone: "danger",
+      body: String(e).replace(/^Error:\s*/, ""),
+    });
+
+  const pickPermission = async (mode: PermissionMode) => {
+    const was = perms?.defaultMode;
+    if (!perms || was === mode) return;
+    setPerms((p) => (p ? { ...p, defaultMode: mode } : p));
+    try {
+      await api.setDefaultPermissionMode(mode);
+    } catch (e) {
+      setPerms((p) => (p && p.defaultMode === mode ? { ...p, defaultMode: was! } : p));
+      refused("the permission mode", e);
+    }
+  };
+
+  const pickEffort = async (level: Effort | null) => {
+    if (!effort) return;
+    const was = effort.defaultEffort;
+    if (was === level) return;
+    setEffort((e) => (e ? { ...e, defaultEffort: level } : e));
+    try {
+      await api.setDefaultEffort(level);
+    } catch (err) {
+      setEffort((e) => (e && e.defaultEffort === level ? { ...e, defaultEffort: was } : e));
+      refused("the thinking default", err);
+    }
+  };
+
   const save = async () => {
     if (!draft) return;
     setBusy(true);
@@ -161,10 +197,7 @@ export default function SettingsPage() {
               type="radio"
               name="permission-mode"
               checked={perms.defaultMode === m.id}
-              onChange={async () => {
-                setPerms({ ...perms, defaultMode: m.id });
-                await api.setDefaultPermissionMode(m.id as PermissionMode);
-              }}
+              onChange={() => pickPermission(m.id as PermissionMode)}
               className="mt-0.5 accent-[var(--color-accent)]"
             />
             <span className="min-w-0">
@@ -188,8 +221,12 @@ export default function SettingsPage() {
             <Button
               size="xs"
               onClick={async () => {
-                await api.applyPermissionsToAgents();
-                setPerms(await api.permissionSettings());
+                try {
+                  await api.applyPermissionsToAgents();
+                  setPerms(await api.permissionSettings());
+                } catch (e) {
+                  refused("those agents", e);
+                }
               }}
               className="ml-2"
             >
@@ -214,10 +251,7 @@ export default function SettingsPage() {
             checked={effort?.defaultEffort == null}
             label="Leave it to the CLI"
             blurb="Whatever claude or opencode does on its own. This is what Eren ships with."
-            onPick={async () => {
-              setEffort((e) => (e ? { ...e, defaultEffort: null } : e));
-              await api.setDefaultEffort(null);
-            }}
+            onPick={() => pickEffort(null)}
           />
         )}
         {effort?.levels.map((l) => (
@@ -226,10 +260,7 @@ export default function SettingsPage() {
             checked={effort.defaultEffort === l.id}
             label={l.label}
             blurb={l.blurb}
-            onPick={async () => {
-              setEffort({ ...effort, defaultEffort: l.id });
-              await api.setDefaultEffort(l.id);
-            }}
+            onPick={() => pickEffort(l.id)}
           />
         ))}
         {!stale && (

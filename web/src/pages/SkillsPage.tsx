@@ -170,7 +170,9 @@ export default function SkillsPage() {
           skill={editing}
           onClose={() => setEditing(null)}
           onChanged={(s) => {
-            setEditing(s);
+            // Done blurs a field, whose save answers after the dialog closed:
+            // replacing `editing` outright would open it again.
+            setEditing((cur) => (cur?.id === s.id ? s : cur));
             load();
           }}
           onDeleted={() => {
@@ -276,9 +278,18 @@ function SkillEditor({
             variant="danger"
             size="sm"
             className="ml-auto"
+            disabled={busy}
             onClick={async () => {
-              await api.deleteSkill(skill.id);
-              onDeleted();
+              setBusy(true);
+              setError(null);
+              try {
+                await api.deleteSkill(skill.id);
+                onDeleted();
+              } catch (e) {
+                setError(String(e).replace(/^Error:\s*/, ""));
+              } finally {
+                setBusy(false);
+              }
             }}
           >
             Delete

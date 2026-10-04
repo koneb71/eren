@@ -218,6 +218,7 @@ impl Engine for CodexEngine {
             mcp_tools: true,
             // `workspace-write`: edits, with commands held to the sandbox.
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 

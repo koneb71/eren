@@ -340,8 +340,10 @@ pub fn is_known_model_for(engine: &str, id: &str) -> bool {
         // step narrower: the provider half is the runtime's own name, so
         // `ollama/deepseek-r1:latest`. Validating only the shape is still
         // right — what a machine has pulled changes without Eren hearing
-        // about it, and the adapter resolves an id it cannot serve against
-        // the catalog it just read rather than failing the save.
+        // about it. The adapter re-reads what the runtime holds before every
+        // run: a named id it has runs, one it lacks is refused by name, and a
+        // bare one is resolved against that catalog rather than failing the
+        // save.
         "opencode" | "ollama" | "lmstudio" => is_provider_model_shape(id),
         // Same reasoning as OpenCode's, one step further: OpenAI's ids are
         // bare names with no provider prefix and the catalog moves, so any

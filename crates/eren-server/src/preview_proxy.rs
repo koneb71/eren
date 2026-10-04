@@ -28,14 +28,28 @@
 //! can reach a preview and nothing else. The suffix match is on the whole host,
 //! so `evil.preview.localhost.attacker.com` does not match, and the label
 //! itself may not contain a dot.
+//!
+//! ## Who may reach one, once accounts are on
+//!
+//! [`crate::auth`] lets every path through on a hostname it cannot tell from
+//! the dashboard's, so this module asks for itself: a preview or an app
+//! answers a loopback TCP peer — this machine, where `*.localhost` resolves —
+//! or a signed-in account whose workspace it is in. Anyone else gets a `401`,
+//! or a `404` for someone else's, exactly as the API would answer. Without
+//! this, a wide bind with accounts on served every preview and every app's
+//! bridge to whoever sent the right `Host` header.
 
+use crate::auth::Caller;
 use crate::AppState;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
 use eren_core::apps;
+use eren_core::scope::Owned;
 use sqlx::Row;
+use std::net::{IpAddr, SocketAddr};
+use uuid::Uuid;
 
 /// Headers that describe one hop and must not be copied to the next.
 const HOP_BY_HOP: [&str; 8] = [
@@ -112,6 +126,20 @@ pub async fn route_previews(
     };
     let slug = slug.to_string();
 
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    match gate(req.extensions().get::<Caller>(), peer) {
+        Gate::Pass => {}
+        Gate::Refuse => return plain(StatusCode::UNAUTHORIZED, "Sign in to Eren first."),
+        Gate::Owner(caller) => {
+            if let Err((status, message)) = require_owner(&state, &caller, kind, &slug).await {
+                return plain(status, message);
+            }
+        }
+    }
+
     if kind == apps::host::HostKind::App {
         let path = req.uri().path().to_string();
         // The reserved prefix is answered here and never forwarded, so the
@@ -140,6 +168,61 @@ pub async fn route_previews(
     match proxy(&state, kind, &slug, req).await {
         Ok(response) => response,
         Err(message) => plain(StatusCode::BAD_GATEWAY, message),
+    }
+}
+
+/// What [`route_previews`] must check before it answers.
+#[derive(Debug)]
+enum Gate {
+    Pass,
+    /// A signed-in account: only what lives in a workspace it owns.
+    Owner(Caller),
+    Refuse,
+}
+
+/// Decided by the TCP peer, never a header. With accounts off,
+/// [`crate::auth`] marks every request [`Caller::Local`] and the access token
+/// has already decided who got this far.
+fn gate(caller: Option<&Caller>, peer: Option<IpAddr>) -> Gate {
+    if peer.is_some_and(|ip| ip.to_canonical().is_loopback()) {
+        return Gate::Pass;
+    }
+    match caller {
+        Some(Caller::Local) => Gate::Pass,
+        Some(c @ Caller::User(_)) => Gate::Owner(c.clone()),
+        Some(Caller::Anonymous) | None => Gate::Refuse,
+    }
+}
+
+/// Refuse unless the preview or app at `slug` is in one of the caller's
+/// workspaces. A name that matches nothing passes, and [`proxy`] then says
+/// nothing is running there — the same words someone else's gets.
+async fn require_owner(
+    state: &AppState,
+    caller: &Caller,
+    kind: apps::host::HostKind,
+    slug: &str,
+) -> Result<(), (StatusCode, String)> {
+    let (sql, owned): (&str, fn(Uuid) -> Owned) = match kind {
+        apps::host::HostKind::Preview => (
+            "SELECT id FROM previews WHERE slug = $1 ORDER BY created_at DESC LIMIT 1",
+            Owned::Preview,
+        ),
+        apps::host::HostKind::App => ("SELECT id FROM apps WHERE slug = $1", Owned::App),
+    };
+    let id: Option<Uuid> = sqlx::query_scalar(sql)
+        .bind(slug)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match id {
+        Some(id) => caller.require(state, owned(id)).await.map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Nothing is running at \"{slug}\"."),
+            )
+        }),
+        None => Ok(()),
     }
 }
 
@@ -292,6 +375,30 @@ fn plain(status: StatusCode, message: impl Into<String>) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_accounts_on_only_this_machine_or_a_signed_in_owner_gets_through() {
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let mapped: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        // This machine, whatever it carries: `*.localhost` resolves here.
+        for peer in [loopback, mapped] {
+            assert!(matches!(
+                gate(Some(&Caller::Anonymous), Some(peer)),
+                Gate::Pass
+            ));
+        }
+        // Another machine with no session is refused, whatever its `Host`
+        // header claims; so is a request no caller was decided for.
+        assert!(matches!(
+            gate(Some(&Caller::Anonymous), Some(lan)),
+            Gate::Refuse
+        ));
+        assert!(matches!(gate(None, Some(lan)), Gate::Refuse));
+        assert!(matches!(gate(Some(&Caller::Anonymous), None), Gate::Refuse));
+        // Accounts off: the token already decided.
+        assert!(matches!(gate(Some(&Caller::Local), Some(lan)), Gate::Pass));
+    }
 
     #[test]
     fn strips_headers_that_describe_only_this_hop() {

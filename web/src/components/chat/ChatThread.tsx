@@ -163,8 +163,10 @@ export function ChatThread({
   useEffect(() => {
     setMessages([]);
     setActiveRunId(null);
+    setOpenQuestion(null);
     setError(null);
     settling.current = null;
+    pollGen.current++;
   }, [chatId]);
 
   // A conversation remembers what it was last run with, so reopening it picks
@@ -192,11 +194,22 @@ export function ChatThread({
   // grace for the one ending that never writes a row (a cancel).
   const settling = useRef<{ runId: string; polls: number } | null>(null);
   const refreshRef = useRef<() => void>(() => {});
+  // A poll's answer only counts if nothing changed while it was out. Switching
+  // chats, sending and answering each move this on, so a response that left
+  // before them is dropped: otherwise chat A's messages, run and question land
+  // in chat B, or a poll from just before a send resets the new run to none.
+  // The open chat is checked too, since a switch renders before its effect
+  // moves the counter.
+  const pollGen = useRef(0);
+  const openChat = useRef(chatId);
+  openChat.current = chatId;
 
   const refresh = useCallback(async () => {
     if (!chatId) return;
+    const gen = pollGen.current;
     try {
       const r = await api.chatMessages(chatId);
+      if (gen !== pollGen.current || openChat.current !== chatId) return;
       setMessages(r.messages);
       setOpenQuestion(r.openQuestion);
       const s = settling.current;
@@ -232,11 +245,16 @@ export function ChatThread({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages.length, streamEvents.length]);
 
+  // One turn at a time: the button is not the only way in (Enter is another),
+  // and the composer is emptied before the request answers.
+  const sending = useRef(false);
   const send = async () => {
     // An attachment on its own is a legitimate turn, so text is not required.
-    if (!chatId || activeRunId || att.busy) return;
+    if (!chatId || activeRunId || att.busy || sending.current) return;
     if (!draft.trim() && att.ids.length === 0 && articleIds.length === 0) return;
+    sending.current = true;
     setError(null);
+    const typed = draft;
     const content = draft.trim();
     const attachmentIds = att.ids;
     const pages = articleIds;
@@ -244,10 +262,14 @@ export function ChatThread({
     // Carry the chips into the optimistic bubble, or they'd vanish for the
     // ~2.5s until the next poll returns the real message.
     const sent = att.items.filter((i) => i.remote).map((i) => i.remote!);
+    // Emptied at once so the composer is free while the turn starts — but
+    // kept, because a refused turn (a paused agent, a spent budget, a turn
+    // already running) must hand the message back rather than lose it.
     setDraft("");
-    att.clear();
+    const files = att.take();
     setArticleIds([]);
     setArticleChips([]);
+    pollGen.current++;
     setMessages((prev) => [
       ...prev,
       {
@@ -273,13 +295,27 @@ export function ChatThread({
         effort,
         planMode: canPlan ? planMode : undefined,
       });
+      pollGen.current++;
+      att.release(files);
       setActiveRunId(r.runId);
       // The first message names the chat server-side — the caller's list is
       // what shows it.
       onSent?.();
     } catch (e) {
-      setError(String(e));
+      pollGen.current++;
+      setError(String(e).replace(/^Error:\s*/, ""));
+      setMessages((prev) => prev.filter((m) => m.id !== "pending"));
+      // Anything typed meanwhile stays, after the message that came back.
+      setDraft((cur) => (cur ? `${typed}\n${cur}` : typed));
+      att.restore(files);
+      setArticleIds((cur) => [...pages, ...cur.filter((id) => !pages.includes(id))]);
+      setArticleChips((cur) => [
+        ...pageChips,
+        ...cur.filter((c) => !pageChips.some((p) => p.id === c.id)),
+      ]);
       refresh();
+    } finally {
+      sending.current = false;
     }
   };
 
@@ -320,8 +356,10 @@ export function ChatThread({
     const id = openQuestion.id;
     setError(null);
     setOpenQuestion(null);
+    pollGen.current++;
     try {
       const r = await api.answerQuestion(chatId, id, answers);
+      pollGen.current++;
       setActiveRunId(r.runId);
       refresh();
     } catch (e) {

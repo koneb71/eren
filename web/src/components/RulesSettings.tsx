@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button } from "./ui/Button";
@@ -19,8 +19,13 @@ export function RulesSettings() {
   const [saved, setSaved] = useState("");
   const [max, setMax] = useState(20000);
   const [busy, setBusy] = useState(false);
+  // Rules that could not be read are not empty rules. An editor shown empty
+  // would invite saving over what is there without ever seeing it, so until
+  // a load succeeds there is the reason and a retry, and nothing to save.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoadError(null);
     api
       .rules()
       .then((r) => {
@@ -28,9 +33,25 @@ export function RulesSettings() {
         setSaved(r.text);
         setMax(r.maxChars);
       })
-      .catch(() => setText(""));
+      .catch((e) => setLoadError(String(e).replace(/^Error:\s*/, "")));
   }, []);
+  useEffect(load, [load]);
 
+  if (loadError !== null) {
+    return (
+      <section className="mt-7 max-w-2xl rounded-xl border border-border bg-panel p-4">
+        <h2 className="text-sm font-semibold text-fg">{user ? "Your rules" : "Rules"}</h2>
+        <p className="mt-2 rounded-lg bg-danger-subtle px-3 py-2 text-xs text-danger-fg">
+          Your rules could not be loaded, so they cannot be edited here yet: {loadError}
+        </p>
+        <div className="mt-2 flex justify-end">
+          <Button size="sm" onClick={load}>
+            Try again
+          </Button>
+        </div>
+      </section>
+    );
+  }
   if (text === null) return null;
   const dirty = text !== saved;
 

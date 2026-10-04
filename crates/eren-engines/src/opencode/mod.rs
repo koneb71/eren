@@ -44,8 +44,10 @@ fn opencode_args(spec: &RunSpec) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "run".into(),
         // One argv entry: `message` is variadic, so a split prompt would be
-        // silently rejoined with different whitespace.
-        spec.prompt.clone().into(),
+        // silently rejoined with different whitespace. Through `positional`,
+        // so a brief opening with "- " is not read as a flag — Ollama and LM
+        // Studio runs are built here too.
+        crate::positional(spec.prompt.clone()).into(),
         "--format".into(),
         "json".into(),
         // The agent our generated config defines — carries the model,
@@ -134,6 +136,7 @@ impl Engine for OpenCodeEngine {
             // scratch directory — never the run's folder.
             mcp_tools: true,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 
@@ -392,6 +395,16 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_prompt_that_starts_with_a_dash_is_not_a_flag() {
+        let mut s = spec();
+        s.prompt = "- fix the login\n- add a test".into();
+        let a = args_of(&s);
+        assert_eq!(a[0], "run");
+        assert!(!a[1].starts_with('-'), "{:?}", a[1]);
+        assert_eq!(a[1].trim_start(), s.prompt);
     }
 
     #[test]

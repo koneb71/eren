@@ -106,8 +106,8 @@ ENV EREN_WEB_DIST=/srv/eren/web
 # actually exposed is decided by the port mapping you declare in compose — and
 # `-p 4820:4820` publishes on every interface, so it is reachable from your
 # network — and since the access token is on unless EREN_ACCESS_TOKEN=off,
-# every caller then needs the access link `docker logs` shows. Compose turns
-# the token off and publishes on 127.0.0.1 only.
+# every caller then needs the access link `docker logs` shows. Compose does
+# the same: the dashboard on every interface, the token on.
 ENV EREN_BIND=0.0.0.0
 # Acknowledged here because binding wide is the only way a container can work,
 # not because the exposure is smaller. See `eren_server::exposure`.

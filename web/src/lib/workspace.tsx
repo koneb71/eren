@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { api, Workspace } from "./api";
+import { readStored, writeStored } from "./storage";
 
 interface WorkspaceCtx {
   workspaces: Workspace[];
@@ -26,8 +27,8 @@ const STORAGE_KEY = "eren.workspace";
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(
-    localStorage.getItem(STORAGE_KEY),
+  const [activeId, setActiveId] = useState<string | null>(() =>
+    readStored(STORAGE_KEY),
   );
 
   const refresh = useCallback(async () => {
@@ -51,7 +52,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   const setActive = useCallback((id: string) => {
-    localStorage.setItem(STORAGE_KEY, id);
+    writeStored(STORAGE_KEY, id);
     setActiveId(id);
   }, []);
 

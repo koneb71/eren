@@ -1,5 +1,5 @@
-//! Utility runs: one-shot, in-memory engine invocations that never touch the
-//! DB, worktrees, or MCP — used for meta-work like AI agent generation. The
+//! Utility runs: one-shot, in-memory engine invocations that never write to
+//! the DB (they only ask the machine's budget), worktrees, or MCP — used for meta-work like AI agent generation. The
 //! engine still runs under the user's own CLI login (compliance unchanged).
 
 use eren_engines::{Engine, RunSpec};
@@ -29,12 +29,29 @@ const DENIED: &[&str] = &[
 ];
 
 pub async fn utility_run(
+    db: &crate::Db,
     engine: Arc<dyn Engine>,
     model_id: String,
     prompt: String,
     effort: Option<ReasoningEffort>,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    // Not a run on any card or project, but a call to a model all the same,
+    // and paid for out of the same plan: a spent machine budget refuses it
+    // like any other start. It leaves no row behind, so nothing counts it —
+    // the budget can stop it, not see it.
+    crate::budgets::check(db, &crate::budgets::Scope::default(), true).await?;
+    // Every tool below is denied, and an engine with no mode in which nothing
+    // writes would refuse that when it starts — said here instead, as the 409
+    // a door gives for an engine that cannot honour the work.
+    if !engine.capabilities().read_only_passes {
+        return Err(crate::runs::orchestrator::CantHonour(format!(
+            "{} has no read-only mode — it runs every tool or none — so it can't draft \
+             this. Pick an engine that has one.",
+            engine.label()
+        ))
+        .into());
+    }
     let cwd = eren_shared::brand::home().join("tmp");
     tokio::fs::create_dir_all(&cwd).await?;
 
@@ -61,6 +78,8 @@ pub async fn utility_run(
         extra_env: HashMap::new(),
     };
 
+    // What a local runtime holds now, not at boot — see `Engine::refresh`.
+    engine.refresh().await;
     let mut proc = engine.start(spec)?;
     let collect = async {
         let mut text_parts: Vec<String> = vec![];

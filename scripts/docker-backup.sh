@@ -123,13 +123,16 @@ fi
 } >"$OUT/COMPLETE"
 trap - ERR
 
-# Retention: only folders this script made (a timestamp first), newest kept.
+# Retention: only complete folders this script made (a timestamp first),
+# newest kept. One without COMPLETE was cut short and is not a backup, so it
+# neither takes a slot from a good one nor is removed in its place.
 KEEP="${EREN_BACKUP_KEEP:-$(setting EREN_BACKUP_KEEP)}"
 KEEP="${KEEP:-10}"
 case "$KEEP" in '' | *[!0-9]*) fail "EREN_BACKUP_KEEP must be a number" ;; esac
 if [ "$KEEP" -gt 0 ]; then
     find "$DIR" -mindepth 1 -maxdepth 1 -type d -name '20[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]*' |
-        sort -r | tail -n +"$((KEEP + 1))" | while IFS= read -r old; do
+        sort -r | while IFS= read -r d; do [ -f "$d/COMPLETE" ] && echo "$d"; done |
+        tail -n +"$((KEEP + 1))" | while IFS= read -r old; do
             rm -rf -- "$old"
             echo "  − removed old backup $old"
         done

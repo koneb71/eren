@@ -284,14 +284,16 @@ pub async fn resume_dead_run(
 
     // Whether anything at all still works on the card — a run, or a step of
     // an epic's run — because two engines in one worktree is the failure this
-    // and Retry both prevent.
+    // and Retry both prevent. Anything not ended, rather than a list of live
+    // states: a plan parked for approval is the card's work too, and a list
+    // is how that one was missed.
     orch.supersede_summary(task_id).await?;
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM runs WHERE task_id = $1
-                           AND status IN ('queued','starting','running','waiting_permission','rate_limited'))
+                           AND status NOT IN ('completed','failed','canceled'))
              OR EXISTS (SELECT 1 FROM steps s JOIN runs r ON r.id = s.run_id
                          WHERE s.task_id = $1
-                           AND s.status IN ('queued','starting','running','waiting_permission','rate_limited')
+                           AND s.status NOT IN ('completed','failed','canceled','skipped')
                            AND r.status NOT IN ('completed','failed','canceled'))",
     )
     .bind(task_id)
@@ -516,5 +518,55 @@ mod tests {
         let p = continuation_prompt(&huge, Some(&"y".repeat(50_000)));
         assert!(p.chars().count() < 4_000, "{}", p.chars().count());
         assert!(p.contains("Do not start over"));
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::approvals::Refusal as Answer;
+    use crate::testdb;
+
+    /// A plan parked for approval is the card's live work: resuming an older
+    /// run of the card under it would put a second engine in the worktree the
+    /// approved plan is about to run in.
+    #[tokio::test]
+    async fn resume_is_refused_while_a_plan_waits_for_approval() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let orch = t.orchestrator(dir.path());
+        orch.set_queue_paused(true).await.unwrap();
+        let (_, project) = t.project(dir.path(), true).await;
+        let card = t.card(project, "planned").await;
+        let dead: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO runs (task_id, status, trigger, engine, session_id, session_engine)
+             VALUES ($1, 'failed', 'manual', 'mock', 'sess-1', 'mock') RETURNING id",
+        )
+        .bind(card)
+        .fetch_one(&t.db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (task_id, status, trigger, engine, plan_approval)
+             VALUES ($1, 'awaiting_approval', 'manual', 'mock', TRUE)",
+        )
+        .bind(card)
+        .execute(&t.db.pool)
+        .await
+        .unwrap();
+
+        match resume_dead_run(&orch, dead).await {
+            Err(Answer::Conflict(m)) => assert!(m.contains("already running"), "{m}"),
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM runs WHERE task_id = $1")
+            .bind(card)
+            .fetch_one(&t.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 2, "nothing was started");
+        t.finish().await;
     }
 }

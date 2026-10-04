@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { motion } from "framer-motion";
 import { nest, TreeNode, TreePage, visibleRows } from "../../lib/kbTree";
+import { readStored, writeStored } from "../../lib/storage";
 import { Plus } from "lucide-react";
 import { IconButton } from "../ui/Button";
 import { Icon } from "../ui/Icon";
@@ -18,7 +19,7 @@ const OPEN_KEY = "eren.kb.open";
 
 function loadOpen(): Set<string> {
   try {
-    return new Set(JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]"));
+    return new Set(JSON.parse(readStored(OPEN_KEY) ?? "[]"));
   } catch {
     return new Set();
   }
@@ -54,7 +55,7 @@ export function PageTree({
   }, [activeId, pages]);
 
   useEffect(() => {
-    localStorage.setItem(OPEN_KEY, JSON.stringify([...open]));
+    writeStored(OPEN_KEY, JSON.stringify([...open]));
   }, [open]);
 
   const roots = nest(pages);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type CloneProgress } from "../lib/api";
+import { readStored, writeStored } from "../lib/storage";
 import { FolderBrowserModal } from "./FolderBrowserModal";
 import { Dialog } from "./ui/Dialog";
 import { Button } from "./ui/Button";
@@ -38,7 +39,7 @@ export function CloneRepoModal({
   const [repo, setRepo] = useState("");
   const [name, setName] = useState("");
   const [parent, setParent] = useState<string | null>(
-    () => localStorage.getItem(LAST_PARENT),
+    () => readStored(LAST_PARENT),
   );
   const [browsing, setBrowsing] = useState(false);
   const [id, setId] = useState<string | null>(null);
@@ -106,7 +107,7 @@ export function CloneRepoModal({
         parent ?? undefined,
         name.trim() || undefined,
       );
-      if (parent) localStorage.setItem(LAST_PARENT, parent);
+      if (parent) writeStored(LAST_PARENT, parent);
       cloneId.current = started.id;
       setId(started.id);
     } catch (e) {

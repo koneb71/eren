@@ -201,6 +201,7 @@ impl Engine for QwenEngine {
             enforces_denied_tools: false,
             mcp_tools: true,
             auto_edit: true,
+            read_only_passes: true,
         }
     }
 

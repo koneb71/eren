@@ -536,14 +536,8 @@ fn resolve_for_write(root: &Path, rel: &str) -> Result<WriteTarget, String> {
     }
 
     if let Some(existing) = resolve(root, rel) {
-        for part in existing.components() {
-            if part
-                .as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(".git")
-            {
-                return Err("eren will not write inside .git".into());
-            }
+        if inside_git(&existing) {
+            return Err("eren will not write inside .git".into());
         }
         let meta = std::fs::metadata(&existing).map_err(|e| e.to_string())?;
         if !meta.is_file() {
@@ -565,6 +559,12 @@ fn resolve_for_write(root: &Path, rel: &str) -> Result<WriteTarget, String> {
     if !parent.is_dir() {
         return Err("that folder does not exist".into());
     }
+    // The resolved parent, not just the requested text: a folder that is a
+    // symlink to `.git/hooks` passes gate 1 and would let a save create a
+    // hook that git then runs.
+    if inside_git(&parent) {
+        return Err("eren will not write inside .git".into());
+    }
     let target = parent.join(name);
     // `symlink_metadata` and not `exists()`: a *dangling* symlink reports as
     // absent, and `File::create` on one writes wherever it points.
@@ -572,6 +572,15 @@ fn resolve_for_write(root: &Path, rel: &str) -> Result<WriteTarget, String> {
         return Err("something is already at that path".into());
     }
     Ok(WriteTarget::New(target))
+}
+
+/// Whether a resolved path has a `.git` component anywhere in it.
+fn inside_git(path: &Path) -> bool {
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(".git")
+    })
 }
 
 /// The final component of a path being created.
@@ -807,6 +816,19 @@ mod tests {
                 "{attempt} must be refused"
             );
         }
+    }
+
+    /// A folder that is a symlink into `.git` passes the check on the
+    /// requested text, so the resolved parent of a new file is checked too —
+    /// otherwise a save through `src/hooks -> .git/hooks` creates a hook.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_through_a_link_into_dot_git_is_refused() {
+        let root = scratch("dotgit-link");
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::os::unix::fs::symlink(root.join(".git/hooks"), root.join("src/hooks")).unwrap();
+        assert!(resolve_for_write(&root, "src/hooks/post-checkout").is_err());
+        assert!(!root.join(".git/hooks/post-checkout").exists());
     }
 
     #[test]

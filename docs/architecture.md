@@ -62,8 +62,9 @@ in?" by *running* the CLI rather than by reading its config. Invariant 3 is why 
 single function — `eren_shared::env_guard::is_auth_env` — that decides whether a name
 looks like a secret, instead of a prefix list per call site. The first version of that check
 lived in two places and knew only about Anthropic prefixes, which stopped nothing the moment
-a second provider existed. The same file lists `OWN_SECRETS` (the S3 keys), which are
-stripped from every child: a spawned CLI inherits the server's whole environment, so the day
+a second provider existed. The same file lists `OWN_SECRETS` (the S3 keys and the access
+token) and `OWN_UNPREFIXED` (`DATABASE_URL`, Eren's own database), which are stripped from
+every child: a spawned CLI inherits the server's whole environment, so the day
 Eren acquired a credential of its own (object storage for the knowledge base) it would
 otherwise have handed that credential to every agent it launched. That is also why every
 process starts through `env_guard::command` and never `Command::new` — `clippy.toml` and a
@@ -187,7 +188,8 @@ Amp's `system` error lines, and an exit-status sentence naming the CLI).
 
 `local/` is the odd one and worth reading before you copy it: Ollama and LM Studio serve a
 model but hold no tools, so `LocalEngine` **delegates to `OpenCodeEngine`** — it resolves a
-model from what the runtime's own CLI reports (`ollama list`, `lms ls --json`), declares
+model from what the runtime's own CLI reports (`ollama list`, `lms ls --json`, re-read before
+every run through `Engine::refresh`; a named id the runtime lacks is refused), declares
 that runtime as OpenCode's provider, and hands the run over. Its `capabilities()` returns
 OpenCode's. It is an engine because that is how a person thinks about the choice, and it
 keeps invariant 1 because the process it spawns is still an official agent binary from
@@ -235,17 +237,18 @@ the sentence a person sees.
 | `enforces_denied_tools` | the CLI refuses a denied tool itself | an agent reviewer cannot run on it |
 | `mcp_tools` | can be handed Eren's MCP server per run without writing into the run's folder | chat, managers and teams are refused at the click (`Orchestrator::needs_tools`); a card run goes without its toolbox |
 | `auto_edit` | can edit files without also being handed a shell | Auto-edit is refused by `vet` rather than widened to Full Auto |
+| `read_only_passes` | can take a pass that must not write (a plan, a summary, a drafting call) in a mode where nothing can | a plan-first card (`vet_card`) and an AI drafting call (`utility_run`) are refused at the click with a 409 |
 
-| engine | interactive | rate limit | resume | append | fixed catalog | cost | enforces deny | mcp | auto_edit |
-|---|---|---|---|---|---|---|---|---|---|
-| claude-code | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| opencode | no | no | yes | yes | no | yes | no | yes | yes |
-| codex | no | no | yes | yes | no | no | no | yes | yes |
-| gemini | no | no | yes | no | yes | no | no | no | yes |
-| cursor | no | no | yes | no | no | no | no | no | no |
-| qwen | no | no | yes | yes | no | no | no | yes | yes |
-| amp | no | no | yes | no | yes | no | no | no | no |
-| ollama, lmstudio | OpenCode's | | | | | | | | |
+| engine | interactive | rate limit | resume | append | fixed catalog | cost | enforces deny | mcp | auto_edit | read-only |
+|---|---|---|---|---|---|---|---|---|---|---|
+| claude-code | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| opencode | no | no | yes | yes | no | yes | no | yes | yes | yes |
+| codex | no | no | yes | yes | no | no | no | yes | yes | yes |
+| gemini | no | no | yes | no | yes | no | no | no | yes | yes |
+| cursor | no | no | yes | no | no | no | no | no | no | yes |
+| qwen | no | no | yes | yes | no | no | no | yes | yes | yes |
+| amp | no | no | yes | no | yes | no | no | no | no | no |
+| ollama, lmstudio | OpenCode's | | | | | | | | | |
 
 There is deliberately **no `Default` impl**. A new adapter has to answer for itself, because
 inheriting "yes, I can do everything" by omission is exactly how a descriptor like this rots
@@ -409,7 +412,11 @@ stop the queue for the life of the process.
 A rate limit puts the run back on the queue at priority 5 behind a backoff of 5m → 15m → 45m
 (`queue::rate_limit_backoff`, capped), with jitter so a burst of held runs does not stampede
 when the window resets. When the engine reports a structured reset time — a `Capabilities`
-flag — the run waits exactly that long instead of guessing. On boot, `recover_orphans`
+flag — the run waits exactly that long instead of guessing; a reset time already past falls
+back to the ladder. `stream_run` notes a limit as it arrives (a stderr watcher reports one
+mid-stream) and acts on it once, after the stream has ended: held — or failed, for a caller
+that cannot be re-dispatched — unless the run completed anyway or Eren stopped it. Holding
+mid-stream wrote a queue row under a run still streaming. On boot, `recover_orphans`
 deletes queue rows whose run has already finished, re-queues `rate_limited` runs that have no
 queue row, fails runs this process was never executing, and marks their open permission
 prompts `expired` so the inbox can offer to resume them.
@@ -420,8 +427,9 @@ getting to the question costs tokens before the wait times out. Manual runs stil
 someone chose to start them and is there to answer.
 
 `Orchestrator::is_executing` is an in-memory registry of the runs this process is actually
-executing, held by a drop guard for the whole of `execute` — post-work included. It is what
-the reaper and a hand-off read when a row's status is not enough.
+executing, held by a drop guard for the whole of `execute` — post-work included, and the
+checks a run starts in the background, which hold a guard of their own until they settle. It
+is what the reaper and a hand-off read when a row's status is not enough.
 
 ## Worktrees
 
@@ -951,7 +959,8 @@ hierarchy for the same decomposition.
 One format covers every pattern — a plain sequence is a pipeline, a step with
 `strategy.parallel` fans out, and a step that `needs` a fan-out step sees all of its outputs.
 Steps default to Auto-edit (`workflow_permission_mode`), under the same Full Auto gate as a
-card. The canvas (`@xyflow/react`) round-trips to that YAML in `web/src/lib/workflowGraph.ts`;
+card: where it does not hold, a step steps down to `short_of_full_auto` for its own engine,
+and a step on an engine with nothing narrower (Amp, Cursor) is refused. The canvas (`@xyflow/react`) round-trips to that YAML in `web/src/lib/workflowGraph.ts`;
 node positions live in the database (0006) so committed workflows stay clean.
 
 ## Apps
@@ -974,7 +983,15 @@ defence is the charset, not the quoting. Two rules that are easy to break:
 - **Additive schema changes apply; destructive ones wait.** `apps::schema::plan` diffs
   declared models against `information_schema` — never a registry. A plan with any
   destructive statement runs *nothing* and is stored whole (`app_schema_plans`), so what a
-  person approves in the inbox is byte-for-byte what executes.
+  person approves in the inbox is byte-for-byte what executes. Approving claims the plan
+  (`pending` → `applying`, 0093) before its DDL runs, so two approvals run it once.
+  Foreign keys are read back from `pg_constraint` like everything else: a field that becomes
+  a `ref:`, or points at another model, has its key moved — dropped before any column
+  changes type, added after every table exists — and where the column already holds values,
+  those that are not ids in the new target are cleared first, which makes that plan a
+  question. Index and key names longer than Postgres's 63 bytes are shortened with a hash
+  (`schema::object_name`); names that always fitted are unchanged, and an index Postgres had
+  already cut short is recognised by its column and renamed rather than rebuilt.
 
 Changing an app is an ordinary card on its own project with two differences, both in
 `apps/build.rs`: **it lands without review, so the undo has to work** — `settle()`
@@ -1298,3 +1315,4 @@ One row per file in `crates/eren-core/migrations/`. The number is the filename's
 | `0090` | `attachments.workspace_id`: a general chat's uploads belong to its workspace (exactly one of project or workspace). |
 | `0091` | `chats.agent_id`: a conversation with one of the workspace's agents — its persona, memories, engine, tier and effort; the run carries the agent, so its gate, limits and budgets apply. |
 | `0092` | Personal rules (`users.rules`, written into each new repository project as AGENTS.md + CLAUDE.md) and personal skills (`skills.workspace_id` NULL, `owner_id`; `skill_in_workspace`). |
+| `0093` | `app_schema_plans.status` may be `applying`: a plan is claimed before its DDL runs, so two approvals cannot both run it. |

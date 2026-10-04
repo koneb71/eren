@@ -178,7 +178,12 @@ impl Orchestrator {
                     };
                     (Some(*reviewer), Some(*reviewer), engine)
                 }
-                _ => (card.get("agent_id"), None, None),
+                // Anything else is the card's own agent continuing its work,
+                // and the run says so — see `enqueue_task`.
+                _ => {
+                    let agent: Option<Uuid> = card.get("agent_id");
+                    (agent, agent, None)
+                }
             };
         crate::agents::assert_can_run(&self.db, agent.as_slice()).await?;
         crate::budgets::check(

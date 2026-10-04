@@ -102,6 +102,10 @@ impl Engine for AmpEngine {
             enforces_denied_tools: false,
             mcp_tools: false,
             auto_edit: false,
+            // Every tool or none: there is no mode in which it only reads,
+            // so a plan, a summary or a drafting call is refused at the click
+            // (`NO_READ_ONLY`) rather than when it starts.
+            read_only_passes: false,
         }
     }
 

@@ -1055,7 +1055,8 @@ gallery page with an **Install** next to it.
 #### Your tables are yours
 
 New tables, new columns and new indexes apply themselves. Anything that **destroys**
-something — a dropped column, a dropped table, a changed type — waits, whole, in [the
+something — a dropped column, a dropped table, a changed type, a field turned into a
+reference whose existing values have to be cleared — waits, whole, in [the
 inbox](#the-inbox): you get the literal SQL and a sentence saying what it costs, and
 nothing has run until you say so. What you approve is byte for byte what executes. The
 comparison is against `information_schema`, not against a registry of what Eren thinks
@@ -1199,7 +1200,9 @@ and leaves the machine at no point.
 Under the hood they are not separate agents — they can't be, because an inference server
 serves a model and holds no tools. Picking **Ollama** or **LM Studio** runs the `opencode`
 binary with that runtime declared as its provider and the model resolved from what the
-runtime actually reports (`ollama list`, `lms ls --json`), as explained at the top of
+runtime actually reports (`ollama list`, `lms ls --json`) — read again before every run, so a
+model you pull while Eren is running is there without a restart, and one you have removed is
+named in the error rather than failing inside OpenCode — as explained at the top of
 [`crates/eren-engines/src/local/mod.rs`](crates/eren-engines/src/local/mod.rs). So both need
 OpenCode installed as well; `doctor` says so when it's the missing piece, and distinguishes
 *not installed* from *installed, but its server isn't running*.
@@ -1473,17 +1476,18 @@ as a normal user. Only Claude Code is installed in it; other engines would need 
 the image. Previews and container apps need one more decision, described under
 [previews in Docker](#previews-in-docker).
 
-Every port the compose file publishes — Eren, Postgres, object storage — is bound to `127.0.0.1`
-on the host. Inside the container Eren binds `0.0.0.0` (the image sets `EREN_BIND` and
+Postgres and object storage are published on `127.0.0.1` only; the dashboard is published on
+every interface (`EREN_PUBLISH_IP`, default `0.0.0.0`), with the access token in front of it.
+Inside the container Eren binds `0.0.0.0` (the image sets `EREN_BIND` and
 `EREN_TRUST_NETWORK=1`, because the container's own loopback is not the host's); what is
-actually reachable is decided by the port mapping. Your browser reaches the container through
-Docker's gateway rather than from its loopback, so the compose file turns the access token
-off (`EREN_ACCESS_TOKEN=off`) — the `127.0.0.1` mapping is what keeps it private. To use it
-from other devices, set `EREN_PUBLISH_IP=0.0.0.0` and `EREN_ALLOWED_HOSTS` to the address you
-reach it by, then either turn [accounts](#accounts) on —
-`docker compose exec eren eren admin create --username <name>` — or set `EREN_ACCESS_TOKEN` to
-a token of your own (16+ characters; compose turns an unset one into `off`) and open the
-access link from `docker compose logs eren`.
+actually reachable is decided by the port mapping. Your own browser reaches the container
+through Docker's gateway rather than from its loopback, so it needs the access link too: open
+the one `docker compose logs eren | grep "open this link"` shows, once per browser. The token
+is kept in the state volume, so the link survives a redeploy. Set `EREN_ALLOWED_HOSTS` to the
+address other devices reach it by, and turn [accounts](#accounts) on —
+`docker compose exec eren eren admin create --username <name>` — if more than one person will
+use it. To keep it to this machine, set `EREN_PUBLISH_IP=127.0.0.1` (and then, if you like,
+`EREN_ACCESS_TOKEN=off`).
 
 **Know what you're trading.** The token is a real credential sitting in a file, valid
 until you revoke it, rather than a keychain entry scoped to your machine. Eren itself

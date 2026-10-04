@@ -52,9 +52,11 @@ pub async fn request(
     crate::agents::assert_assignable(&orch.db, to_agent)
         .await
         .map_err(Refusal::Gated)?;
+    // Any run not yet ended, a parked plan included: it is the card's
+    // current work as much as a running one is.
     let live: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM runs WHERE task_id = $1
-            AND status IN ('queued','starting','running','waiting_permission','rate_limited')
+            AND status NOT IN ('completed','failed','canceled')
           ORDER BY created_at DESC LIMIT 1",
     )
     .bind(task_id)
@@ -157,22 +159,13 @@ pub async fn settle(orch: &Orchestrator, task_id: Uuid) -> anyhow::Result<Option
         // Nothing was done yet, so this is the card's own start — through the
         // Start button's door, which vets the new agent's engine and mode and
         // moves the card — with the note beside the brief.
-        match orch.start_card(task_id).await {
-            Ok(run_id) => {
-                sqlx::query(
-                    "UPDATE runs r SET prompt_override = t.prompt || $2
-                       FROM tasks t WHERE r.id = $1 AND t.id = r.task_id",
-                )
-                .bind(run_id)
-                .bind(format!(
-                    "\n\nA note from the person who handed this task to you:\n{note}"
-                ))
-                .execute(&orch.db.pool)
-                .await?;
-                Ok(run_id)
-            }
-            Err(e) => Err(e),
-        }
+        orch.start_card_with(
+            task_id,
+            Some(&format!(
+                "\n\nA note from the person who handed this task to you:\n{note}"
+            )),
+        )
+        .await
     };
     match started {
         Ok(run_id) => {

@@ -13,6 +13,10 @@
 //! - `/mcp` from a loopback peer: the spawned agent CLIs, which carry no
 //!   cookie and are identified by the live run in their URL, as before.
 //!
+//! A preview's or an app's hostname reaches this layer as an ordinary path,
+//! so [`crate::preview_proxy`] asks again for itself: a loopback peer or a
+//! signed-in owner, nobody else.
+//!
 //! "Loopback" is the TCP peer, never a header — the same rule as the token.
 //!
 //! An account whose password the admin reset reaches nothing but
@@ -343,8 +347,8 @@ pub(crate) fn open_path(path: &str) -> Open {
     if under("/api") || under("/ws") {
         return Open::No;
     }
-    // The dashboard's files (the sign-in page is one of them), and whatever
-    // the preview proxy answers on its own hostnames.
+    // The dashboard's files (the sign-in page is one of them). A preview or
+    // app hostname lands here too, and `preview_proxy` gates it itself.
     Open::Yes
 }
 

@@ -95,13 +95,7 @@ pub async fn set_manager_in(
     agent: Uuid,
     manager: Option<Uuid>,
 ) -> anyhow::Result<Result<(), Refused>> {
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtext('eren.org_chart:' || workspace_id::text))
-           FROM agents WHERE id = $1",
-    )
-    .bind(agent)
-    .execute(&mut **tx)
-    .await?;
+    lock_chart(tx, agent).await?;
     if let Some(manager) = manager {
         // Read through the pool, which sees every committed move: any other
         // move in this workspace is serialised behind the lock just taken.
@@ -165,12 +159,34 @@ async fn height_of(db: &Db, id: Uuid) -> anyhow::Result<i32> {
     .unwrap_or(0))
 }
 
+/// Hold the agent's workspace's chart for the rest of the transaction. Every
+/// write of `reports_to` takes it, or a move vetted against the chart could
+/// interleave with a lift that changes the chart under it.
+async fn lock_chart(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    agent: Uuid,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtext('eren.org_chart:' || workspace_id::text))
+           FROM agents WHERE id = $1",
+    )
+    .bind(agent)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Retiring a manager lifts its reports to its own manager, so nobody is
-/// left reporting to someone who will never manage again.
+/// left reporting to someone who will never manage again. Under the chart's
+/// lock, like [`set_manager`]: unlocked, a move made at the same moment — a
+/// report placed under the retiring manager, its manager moved under one of
+/// its reports — was vetted against a chart this then changed, and could
+/// leave a report under a retiree or close a cycle.
 pub async fn lift_reports(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     retiring: Uuid,
 ) -> anyhow::Result<u64> {
+    lock_chart(tx, retiring).await?;
     Ok(sqlx::query(
         "UPDATE agents SET reports_to = (SELECT reports_to FROM agents WHERE id = $1)
           WHERE reports_to = $1",

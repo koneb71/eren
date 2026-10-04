@@ -208,6 +208,7 @@ async fn propose_recipe(
         .model_for(&engine_id, eren_shared::ModelTier::Complex);
 
     let reply = eren_core::runs::utility::utility_run(
+        &state.db,
         engine,
         model_id,
         eren_core::previews::recipe_writer::prompt(&survey),
@@ -215,7 +216,7 @@ async fn propose_recipe(
         std::time::Duration::from_secs(240),
     )
     .await
-    .map_err(internal)?;
+    .map_err(super::run_refused)?;
 
     let Some((kind, text)) = eren_core::previews::recipe_writer::extract(&reply) else {
         return Err((

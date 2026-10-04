@@ -315,12 +315,14 @@ pub async fn scope_of_chat(db: &Db, chat_id: Uuid) -> anyhow::Result<Scope> {
     Ok(row.map(scope_from).unwrap_or_default())
 }
 
-/// The scope a research run would have.
+/// The scope a research run would have. A project's research carries no
+/// workspace of its own — the project's is the one its policies name.
 pub async fn scope_of_research(db: &Db, research_id: Uuid) -> anyhow::Result<Scope> {
     let row = sqlx::query(
-        "SELECT rs.workspace_id AS workspace, rs.project_id AS project,
+        "SELECT COALESCE(p.workspace_id, rs.workspace_id) AS workspace, rs.project_id AS project,
                 NULL::uuid AS agent, NULL::uuid AS team, NULL::uuid AS routine
-           FROM researches rs WHERE rs.id = $1",
+           FROM researches rs LEFT JOIN projects p ON p.id = rs.project_id
+          WHERE rs.id = $1",
     )
     .bind(research_id)
     .fetch_optional(&db.pool)

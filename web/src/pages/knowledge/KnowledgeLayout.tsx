@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useParams } from "react-router-dom";
 import { api, Space } from "../../lib/api";
 import { TreePage } from "../../lib/kbTree";
 import { useWorkspace } from "../../lib/workspace";
+import { readStored, removeStored, writeStored } from "../../lib/storage";
 import { PageTree } from "../../components/kb/PageTree";
 import { GenerateModal } from "../../components/kb/GenerateModal";
 import { NARROW, useMediaQuery } from "../../lib/useMediaQuery";
@@ -35,7 +36,7 @@ export default function KnowledgeLayout() {
 
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceId] = useState<string | null>(
-    () => localStorage.getItem(SPACE_KEY) || null,
+    () => readStored(SPACE_KEY) || null,
   );
   const [pages, setPages] = useState<TreePage[]>([]);
   const [query, setQuery] = useState("");
@@ -62,8 +63,8 @@ export default function KnowledgeLayout() {
   }, [reload]);
 
   useEffect(() => {
-    if (spaceId) localStorage.setItem(SPACE_KEY, spaceId);
-    else localStorage.removeItem(SPACE_KEY);
+    if (spaceId) writeStored(SPACE_KEY, spaceId);
+    else removeStored(SPACE_KEY);
   }, [spaceId]);
 
   // Search is server-side over titles *and* bodies, so it finds the page that

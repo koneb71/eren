@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api, SkillDraft, Tier } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { coerceSkillDrafts } from "../lib/skillDrafts";
 import { TierPicker } from "./TierPicker";
 import { Dialog } from "./ui/Dialog";
 import { Button } from "./ui/Button";
@@ -34,6 +35,11 @@ export function GenerateSkillsWizard({
   const [saved, setSaved] = useState<Set<number>>(new Set());
   const [personal, setPersonal] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Drafts whose save has not answered yet. The ref is the guard (a double
+  // click lands twice before any re-render, and the second save would then
+  // fail as "name taken"); the state only greys the button.
+  const inFlight = useRef<Set<number>>(new Set());
+  const [saving, setSaving] = useState<Set<number>>(new Set());
 
   const generate = async () => {
     if (!description.trim()) return;
@@ -41,7 +47,7 @@ export function GenerateSkillsWizard({
     setError(null);
     try {
       const r = await api.generateSkills(description.trim(), undefined, tier);
-      setDrafts(r.drafts);
+      setDrafts(coerceSkillDrafts(r.drafts));
       setSaved(new Set());
       setPhase("review");
     } catch (e) {
@@ -52,6 +58,9 @@ export function GenerateSkillsWizard({
 
   const saveDraft = async (index: number) => {
     const d = drafts[index];
+    if (!d || inFlight.current.has(index) || saved.has(index)) return;
+    inFlight.current.add(index);
+    setSaving(new Set(inFlight.current));
     setError(null);
     try {
       await api.createSkill({
@@ -66,6 +75,9 @@ export function GenerateSkillsWizard({
       onSaved();
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
+    } finally {
+      inFlight.current.delete(index);
+      setSaving(new Set(inFlight.current));
     }
   };
 
@@ -184,7 +196,7 @@ export function GenerateSkillsWizard({
                 {saved.has(i) ? (
                   <span className="text-sm text-success-fg">Saved</span>
                 ) : (
-                  <Button variant="primary" size="sm" onClick={() => void saveDraft(i)} disabled={!d.name.trim()}>
+                  <Button variant="primary" size="sm" onClick={() => void saveDraft(i)} disabled={!d.name.trim() || saving.has(i)}>
                     Save skill
                   </Button>
                 )}

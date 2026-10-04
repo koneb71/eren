@@ -232,6 +232,9 @@ struct Liveness {
     /// When `runs.last_event_at` was last written for it, so a chatty run
     /// writes the row every fifteen seconds rather than every event.
     written: Option<std::time::Instant>,
+    /// How many [`Alive`] guards hold it. More than one once `execute` hands
+    /// work that outlives it — the checks after a run — a guard of its own.
+    holders: usize,
 }
 
 /// A run's place in [`Orchestrator::liveness`] for as long as it is held.
@@ -243,7 +246,12 @@ pub(crate) struct Alive {
 impl Drop for Alive {
     fn drop(&mut self) {
         if let Ok(mut map) = self.map.lock() {
-            map.remove(&self.run_id);
+            if let Some(l) = map.get_mut(&self.run_id) {
+                l.holders = l.holders.saturating_sub(1);
+                if l.holders == 0 {
+                    map.remove(&self.run_id);
+                }
+            }
         }
     }
 }
@@ -291,7 +299,7 @@ pub(crate) struct BoundAgent {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct StepPermission {
     pub mode: PermissionMode,
-    /// True when FullAuto was refused and Reviewed substituted.
+    /// True when FullAuto was refused and something narrower substituted.
     pub downgraded: bool,
 }
 
@@ -300,21 +308,27 @@ pub(crate) struct StepPermission {
 /// Pure so it can be tested without a database or a worktree on disk — the
 /// gate is a safety property and deserves to be pinned down directly rather
 /// than inferred from an integration run.
+///
+/// Where the gate does not hold, the step takes what a card would:
+/// [`short_of_full_auto`] for the engine it runs on. `None` is a refusal — an
+/// engine with nothing narrower than every tool cannot be stepped down, and
+/// handing it Reviewed would be a mode it ignores.
 pub(crate) fn resolve_step_permission(
     asked: PermissionMode,
     gate_satisfied: bool,
-) -> StepPermission {
+    caps: &eren_engines::Capabilities,
+) -> Option<StepPermission> {
     if asked == PermissionMode::FullAuto && !gate_satisfied {
         // Down, never up: refusing FullAuto is de-escalation and safe.
-        StepPermission {
-            mode: PermissionMode::Reviewed,
+        short_of_full_auto(caps).map(|mode| StepPermission {
+            mode,
             downgraded: true,
-        }
+        })
     } else {
-        StepPermission {
+        Some(StepPermission {
             mode: asked,
             downgraded: false,
-        }
+        })
     }
 }
 
@@ -486,13 +500,20 @@ impl Orchestrator {
     }
 
     pub(crate) fn alive(&self, run_id: Uuid) -> Alive {
-        self.liveness.lock().unwrap().insert(
-            run_id,
-            Liveness {
-                seen: std::time::Instant::now(),
+        let now = std::time::Instant::now();
+        self.liveness
+            .lock()
+            .unwrap()
+            .entry(run_id)
+            .and_modify(|l| {
+                l.seen = now;
+                l.holders += 1;
+            })
+            .or_insert(Liveness {
+                seen: now,
                 written: None,
-            },
-        );
+                holders: 1,
+            });
         Alive {
             map: self.liveness.clone(),
             run_id,
@@ -500,10 +521,11 @@ impl Orchestrator {
     }
 
     /// Is this process still inside the run's `execute` — including the
-    /// post-work after the engine exits (the report, checks, the review)?
-    /// A run's status turns terminal before that work is done, so "not live
-    /// in the database" alone does not mean "safe to start another run in
-    /// its worktree".
+    /// post-work after the engine exits (the report, the review) and the
+    /// checks it started in the background, which hold their own guard until
+    /// they settle? A run's status turns terminal before that work is done,
+    /// so "not live in the database" alone does not mean "safe to start
+    /// another run in its worktree".
     pub fn is_executing(&self, run_id: Uuid) -> bool {
         self.liveness.lock().unwrap().contains_key(&run_id)
     }
@@ -670,6 +692,17 @@ impl Orchestrator {
     /// Create a run for a board task and put it on the queue. A task handed
     /// to a team runs as that team instead of a single agent.
     pub async fn enqueue_task(&self, task_id: Uuid) -> anyhow::Result<Uuid> {
+        self.enqueue_task_with(task_id, None).await
+    }
+
+    /// [`Self::enqueue_task`], with text added after the card's brief for this
+    /// run alone — a handoff's note. Written by the insert itself: set
+    /// afterwards, the run was already claimable without it.
+    pub async fn enqueue_task_with(
+        &self,
+        task_id: Uuid,
+        brief_suffix: Option<&str>,
+    ) -> anyhow::Result<Uuid> {
         // One start of a card at a time. The checks below and the insert that
         // acts on them used to be separate statements, so a double click — or
         // a drag racing the Start button — passed both checks twice and put
@@ -780,14 +813,21 @@ impl Orchestrator {
         .await?;
         // The run and its queue row commit together. Apart, a crash between
         // them left a run reading `queued` that nothing would ever dispatch.
+        //
+        // Who the run is, stamped now: the card's assignee can change after
+        // the work is done, and the run's author, its spend and its load
+        // belong to the agent that did it, not whoever holds the card later.
         let row = sqlx::query(
-            "INSERT INTO runs (task_id, status, trigger, engine, plan_approval)
-             SELECT t.id, 'queued', 'manual', COALESCE(a.engine, t.engine), t.plan_first
+            "INSERT INTO runs (task_id, status, trigger, engine, plan_approval, agent_id,
+                               prompt_override)
+             SELECT t.id, 'queued', 'manual', COALESCE(a.engine, t.engine), t.plan_first,
+                    t.agent_id, t.prompt || $2::text
              FROM tasks t LEFT JOIN agents a ON a.id = t.agent_id
              WHERE t.id = $1
              RETURNING id",
         )
         .bind(task_id)
+        .bind(brief_suffix)
         .fetch_one(&mut *guard)
         .await?;
         let run_id: Uuid = row.get("id");
@@ -1140,16 +1180,34 @@ impl Orchestrator {
 
         let mut ids = vec![];
         for variant in variants {
+            // Whoever the variant runs as is stamped on the row, and their
+            // engine wins over the card's exactly as it does for an ordinary
+            // start — only an engine the variant names itself beats it.
+            let runs_as = variant.agent_id.or(card_agent);
+            let agent_engine: Option<String> = match runs_as {
+                Some(agent) => sqlx::query_scalar("SELECT engine FROM agents WHERE id = $1")
+                    .bind(agent)
+                    .fetch_optional(&self.db.pool)
+                    .await?
+                    .flatten(),
+                None => None,
+            };
             let row = sqlx::query(
                 "INSERT INTO runs (task_id, agent_id, tier_override, variant_label,
                                    status, trigger, engine)
                  VALUES ($1,$2,$3,$4,'queued','bakeoff',$5) RETURNING id",
             )
             .bind(task_id)
-            .bind(variant.agent_id)
+            .bind(runs_as)
             .bind(variant.tier.as_deref())
             .bind(&variant.label)
-            .bind(variant.engine.as_ref().unwrap_or(&engine))
+            .bind(
+                variant
+                    .engine
+                    .as_ref()
+                    .or(agent_engine.as_ref())
+                    .unwrap_or(&engine),
+            )
             .fetch_one(&self.db.pool)
             .await?;
             let run_id: Uuid = row.get("id");
@@ -1375,6 +1433,20 @@ impl Orchestrator {
         )
         .execute(&mut *tx)
         .await?;
+        // An app's schema plan claimed for applying when the server went
+        // down. Its DDL ran in one transaction, so it either all landed or
+        // none did, and which is not recorded — so it is not put back to be
+        // applied again over a schema it may already have changed. It says
+        // what happened, and the next manifest change proposes afresh.
+        sqlx::query(
+            "UPDATE app_schema_plans
+                SET status = 'failed',
+                    error = 'the server restarted while this change was being applied — \
+check the app''s data, then save its manifest again to see what is still to do'
+              WHERE status = 'applying'",
+        )
+        .execute(&mut *tx)
+        .await?;
         // And the mirror image: a run that says it is held has to actually be
         // waiting for something. A crash between `hold_rate_limited`'s two
         // statements, or a queue row deleted by hand, leaves `rate_limited`
@@ -1405,6 +1477,28 @@ impl Orchestrator {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        // An app build whose run died with the process ends with it, as it
+        // would have through `finish`.
+        for run_id in &orphans {
+            let task: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_optional(&self.db.pool)
+                .await?
+                .flatten();
+            if let Some(task_id) = task {
+                if let Err(e) = apps::build::settle(
+                    &self.db,
+                    &self.worktrees,
+                    task_id,
+                    RunStatus::Failed,
+                    Some("orphaned by server restart"),
+                )
+                .await
+                {
+                    tracing::warn!(%run_id, error=%e, "could not settle this app's build");
+                }
+            }
+        }
         // And so do the cards those steps stand for — otherwise a restart leaves
         // a column of sub-tickets stuck at "In Progress" with nothing behind
         // them, which is the same lie `settle_steps` exists to prevent.
@@ -1461,14 +1555,28 @@ impl Orchestrator {
     /// preset win over the card's, and a card with no mode takes the
     /// machine's default — exactly what the run would get.
     pub async fn vet_card(&self, task_id: Uuid) -> anyhow::Result<Option<String>> {
+        self.vet_card_as(task_id, None, None).await
+    }
+
+    /// [`Self::vet_card`] for a run of the card by another agent or on
+    /// another engine — a bake-off variant — resolved the way that run will
+    /// be: its own engine, else its agent's, else the card's.
+    pub async fn vet_card_as(
+        &self,
+        task_id: Uuid,
+        agent_id: Option<Uuid>,
+        engine: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
         let row = sqlx::query(
-            "SELECT COALESCE(a.engine, t.engine) AS engine,
+            "SELECT COALESCE($3, a.engine, t.engine) AS engine,
                     COALESCE(a.permission_preset, t.permission_mode) AS mode,
-                    p.full_auto_opt_in, p.vcs
+                    p.full_auto_opt_in, p.vcs, t.plan_first
              FROM tasks t JOIN projects p ON p.id = t.project_id
-             LEFT JOIN agents a ON a.id = t.agent_id WHERE t.id = $1",
+             LEFT JOIN agents a ON a.id = COALESCE($2, t.agent_id) WHERE t.id = $1",
         )
         .bind(task_id)
+        .bind(agent_id)
+        .bind(engine)
         .fetch_one(&self.db.pool)
         .await?;
         let mut mode = match row.get::<Option<String>, _>("mode") {
@@ -1476,6 +1584,20 @@ impl Orchestrator {
             None => self.default_permission_mode().await,
         };
         let engine_id: String = row.get("engine");
+        // A plan-first card opens with a pass that must not write; an engine
+        // with no such mode would refuse it the moment it started.
+        if row.get::<bool, _>("plan_first") {
+            if let Some(engine) = self
+                .engine(&engine_id)
+                .filter(|e| !e.capabilities().read_only_passes)
+            {
+                return Ok(Some(format!(
+                    "{} has no read-only mode, so it can't write this card's plan first. \
+Turn off \"plan first\" for the card, or run it on an engine that has one.",
+                    engine.label()
+                )));
+            }
+        }
         // The Full Auto gate dispatch will apply, said at the click: where it
         // will not hold, the card runs as the narrowest mode its engine has —
         // or, for an engine with none, cannot start at all.
@@ -1503,10 +1625,20 @@ project, or run this card on an engine with a narrower mode.",
     /// Start a card the way the Start button does — vetted, queued, moved to
     /// In Progress — for a start nobody clicked.
     pub async fn start_card(&self, task_id: Uuid) -> anyhow::Result<Uuid> {
+        self.start_card_with(task_id, None).await
+    }
+
+    /// [`Self::start_card`] with a suffix to the brief — see
+    /// [`Self::enqueue_task_with`].
+    pub async fn start_card_with(
+        &self,
+        task_id: Uuid,
+        brief_suffix: Option<&str>,
+    ) -> anyhow::Result<Uuid> {
         if let Some(reason) = self.vet_card(task_id).await? {
             anyhow::bail!(reason);
         }
-        let run_id = self.enqueue_task(task_id).await?;
+        let run_id = self.enqueue_task_with(task_id, brief_suffix).await?;
         sqlx::query("UPDATE tasks SET board_column='running' WHERE id=$1")
             .bind(task_id)
             .execute(&self.db.pool)
@@ -2662,7 +2794,13 @@ project, or run this card on an engine with a narrower mode.",
                     let check_run_id =
                         crate::checks::begin(&self.db, task_id, Some(run_id), "auto").await?;
                     let this = self.clone();
+                    // The checks run in the worktree after `execute` returns,
+                    // so they keep the run executing until they settle: a
+                    // handoff waiting on it must not start the next agent in
+                    // a worktree the checks are still building.
+                    let alive = self.alive(run_id);
                     tokio::spawn(async move {
+                        let _alive = alive;
                         this.settle_checks(
                             task_id,
                             run_id,
@@ -3086,11 +3224,24 @@ project, or run this card on an engine with a narrower mode.",
         if self.engine(&engine).is_none() {
             anyhow::bail!("{engine} isn't installed on this machine");
         }
-        // Before the research exists, so a refusal leaves nothing behind.
+        // Before the research exists, so a refusal leaves nothing behind. A
+        // project's research is in the project's workspace, and a workspace
+        // budget covers it as much as one on the project.
+        let workspace = match project_id {
+            Some(project) => sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT workspace_id FROM projects WHERE id = $1",
+            )
+            .bind(project)
+            .fetch_optional(&self.db.pool)
+            .await?
+            .flatten()
+            .or(workspace_id),
+            None => workspace_id,
+        };
         crate::budgets::check(
             &self.db,
             &crate::budgets::Scope {
-                workspace: workspace_id,
+                workspace,
                 project: project_id,
                 ..Default::default()
             },
@@ -4102,12 +4253,20 @@ project, or run this card on an engine with a narrower mode.",
                 );
                 let prompt = eren_shared::interpolate(&step.prompt, &outputs);
 
-                let resolved = self.workflow_permission_mode(
+                let Some(resolved) = self.workflow_permission_mode(
                     &workflow,
                     agent.as_ref(),
                     full_auto_opt_in,
                     &shared.path,
-                );
+                    &step_engine.capabilities(),
+                ) else {
+                    anyhow::bail!(
+                        "step {step_id}: {} can only run with every tool allowed, and Full Auto \
+is off for this project (it needs the project's opt-in and a worktree to work in). Turn it on for \
+the project, or give the step an engine with a narrower mode.",
+                        step_engine.label()
+                    );
+                };
                 let permission_mode = resolved.mode;
 
                 // Nobody is at the keyboard at 3am. Parking no longer freezes
@@ -4399,6 +4558,11 @@ this workflow manually."
         .bind(&outcome.output)
         .execute(&self.db.pool)
         .await?;
+        // The revised plan answers the note it was sent back with.
+        sqlx::query("UPDATE runs SET plan_note = NULL WHERE id = $1 AND plan_note IS NOT NULL")
+            .bind(run_id)
+            .execute(&self.db.pool)
+            .await?;
 
         // The card stays in "running": it is not in review — there is no diff
         // — and certainly not done. The activity view already sorts
@@ -4429,24 +4593,22 @@ this workflow manually."
         .filter(|t| !t.trim().is_empty()))
     }
 
-    /// Outstanding feedback on a rejected plan, consumed as it is read.
+    /// Outstanding feedback on a rejected plan.
     ///
-    /// Cleared here rather than by the route, so a revise request survives a
-    /// crash between asking and dispatching but can never be replayed into a
-    /// second pass it wasn't meant for.
+    /// Read, not consumed: a planning pass held by a rate limit is dispatched
+    /// again, and a note cleared by the first dispatch left the second writing
+    /// a fresh plan with the objection gone. Cleared by `park_for_approval`
+    /// once the revised plan is stored — the moment the note has been
+    /// answered, and so can never be replayed into a pass it was not meant for.
     async fn plan_revision_note(&self, run_id: Uuid) -> anyhow::Result<Option<String>> {
-        // A CTE, because `RETURNING` hands back the *new* row — reading the
-        // column it was just cleared to would always be null.
-        Ok(sqlx::query_scalar::<_, Option<String>>(
-            "WITH prev AS (SELECT plan_note FROM runs WHERE id = $1)
-             UPDATE runs SET plan_note = NULL WHERE id = $1
-             RETURNING (SELECT plan_note FROM prev)",
+        Ok(
+            sqlx::query_scalar::<_, Option<String>>("SELECT plan_note FROM runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_optional(&self.db.pool)
+                .await?
+                .flatten()
+                .filter(|n| !n.trim().is_empty()),
         )
-        .bind(run_id)
-        .fetch_optional(&self.db.pool)
-        .await?
-        .flatten()
-        .filter(|n| !n.trim().is_empty()))
     }
 
     /// Did a person rewrite the plan, rather than approve what was proposed?
@@ -4678,14 +4840,15 @@ this workflow manually."
         agent: Option<&BoundAgent>,
         full_auto_opt_in: bool,
         cwd: &std::path::Path,
-    ) -> StepPermission {
+        caps: &eren_engines::Capabilities,
+    ) -> Option<StepPermission> {
         let spec = agent
             .and_then(|a| a.permission_preset.clone())
             .or_else(|| workflow.defaults.permission_mode.clone());
         let asked = spec
             .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
             .unwrap_or(PermissionMode::AutoEdit);
-        resolve_step_permission(asked, full_auto_opt_in && self.worktrees.manages(cwd))
+        resolve_step_permission(asked, full_auto_opt_in && self.worktrees.manages(cwd), caps)
     }
 
     /// Shared streaming loop: spawn the engine, persist+publish every event,
@@ -4717,6 +4880,8 @@ this workflow manually."
                 session_id: None,
             });
         }
+        // What a local runtime holds now, not at boot — see `Engine::refresh`.
+        engine.refresh().await;
         let mut proc = engine.start(spec)?;
 
         // Registered under the run, with a per-step slot so a fan-out's
@@ -4752,11 +4917,18 @@ this workflow manually."
         // those mid-stream anyway. Dollars have no equivalent — no engine
         // says what a run cost until it ends.
         let token_limit = crate::budgets::token_headroom(&self.db, run_id, step_id).await;
+        // A rate limit is noted as it arrives and acted on once the stream has
+        // ended — see the ending below for why not at once.
+        let mut rate_limited: Option<(Option<DateTime<Utc>>, String)> = None;
+        // Ended by Eren rather than the engine: a cancel or a budget stop is
+        // the outcome whatever the engine said about limits on its way out.
+        let mut stopped_here = false;
         loop {
             tokio::select! {
                 _ = &mut cancel_rx => {
                     let _ = proc.interrupt().await;
                     outcome = Some((RunStatus::Canceled, None));
+                    stopped_here = true;
                     break;
                 }
                 event = proc.events.recv() => {
@@ -4816,6 +4988,7 @@ this workflow manually."
                             if let Some((limit, policy)) = &token_limit {
                                 if tally.output_tokens() > *limit {
                                     let _ = proc.interrupt().await;
+                                    stopped_here = true;
                                     outcome = Some((
                                         RunStatus::Failed,
                                         Some(format!(
@@ -4851,29 +5024,23 @@ this workflow manually."
                             }
                         }
                         ErenEvent::RateLimited { reset_at, message } => {
-                            // Held or failed, never both, and never a queue
-                            // row without the status that explains it — see
-                            // `CallerKind::on_rate_limit`.
-                            outcome = Some(match caller.on_rate_limit() {
-                                OnRateLimit::Hold => {
-                                    self.hold_rate_limited(run_id, *reset_at).await?;
-                                    (RunStatus::RateLimited, Some(message.clone()))
+                            // Noted, not acted on. A stderr watcher reports a
+                            // limit the moment it is printed, while the stream
+                            // goes on — and holding here wrote `rate_limited`
+                            // and a queue row under a run still streaming,
+                            // which `claim_next` could hand a second engine,
+                            // and which a `RunFailed` a moment later deleted
+                            // again through `finish`. The first message is
+                            // kept; a reset time is kept from whichever event
+                            // carried one.
+                            match &mut rate_limited {
+                                None => rate_limited = Some((*reset_at, message.clone())),
+                                Some((seen, _)) => {
+                                    if seen.is_none() {
+                                        *seen = *reset_at;
+                                    }
                                 }
-                                OnRateLimit::Fail => (
-                                    RunStatus::Failed,
-                                    Some(format!("{message} (this run can't be held and resumed, so it stopped here)")),
-                                ),
-                            });
-                            let ctx = crate::attention::Ctx {
-                                title: "eren: rate limited".to_string(),
-                                ..crate::attention::ctx_for_run(&self.db, run_id, None).await
-                            };
-                            crate::attention::fire(
-                                &self.db,
-                                crate::attention::Event::RateLimited,
-                                ctx,
-                            )
-                            .await;
+                            }
                         }
                         _ => {}
                     }
@@ -4893,6 +5060,38 @@ this workflow manually."
         if let Err(e) = self.flush_usage(run_id, step_id, delta, provisional).await {
             // Never fail a run over its own bookkeeping.
             tracing::warn!(%run_id, error = %e, "could not record token usage");
+        }
+
+        // The limit decides the ending only when the engine's own word does
+        // not: a run that completed after printing a limit completed (stderr
+        // never ends a run on its own, as `pump::spawn` has it), and one Eren
+        // stopped stays stopped. Otherwise — no ending at all, or the failure
+        // the limit caused — it is held, or failed, exactly once.
+        let limit_decides = !stopped_here
+            && !matches!(
+                outcome,
+                Some((RunStatus::Completed, _)) | Some((RunStatus::Canceled, _))
+            );
+        if let Some((reset_at, message)) = rate_limited.filter(|_| limit_decides) {
+            // Held or failed, never both, and never a queue row without the
+            // status that explains it — see `CallerKind::on_rate_limit`.
+            outcome = Some(match caller.on_rate_limit() {
+                OnRateLimit::Hold => {
+                    self.hold_rate_limited(run_id, reset_at).await?;
+                    (RunStatus::RateLimited, Some(message))
+                }
+                OnRateLimit::Fail => (
+                    RunStatus::Failed,
+                    Some(format!(
+                        "{message} (this run can't be held and resumed, so it stopped here)"
+                    )),
+                ),
+            });
+            let ctx = crate::attention::Ctx {
+                title: "eren: rate limited".to_string(),
+                ..crate::attention::ctx_for_run(&self.db, run_id, None).await
+            };
+            crate::attention::fire(&self.db, crate::attention::Event::RateLimited, ctx).await;
         }
 
         let (status, reason) = outcome.unwrap_or((
@@ -4940,13 +5139,19 @@ this workflow manually."
         run_id: Uuid,
         reset_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
-        let holds: i32 = sqlx::query_scalar(
+        // Only a run that has not ended: one a person closed out while its
+        // stream was winding down stays closed, with no queue row to revive it.
+        let Some(holds): Option<i32> = sqlx::query_scalar(
             "UPDATE runs SET status='rate_limited', rate_limit_attempts = rate_limit_attempts + 1
-             WHERE id=$1 RETURNING rate_limit_attempts",
+             WHERE id=$1 AND status NOT IN ('completed','failed','canceled')
+             RETURNING rate_limit_attempts",
         )
         .bind(run_id)
-        .fetch_one(&self.db.pool)
-        .await?;
+        .fetch_optional(&self.db.pool)
+        .await?
+        else {
+            return Ok(());
+        };
         let not_before = rate_limit_backoff(crate::queue::attempt_index(holds), reset_at);
         sqlx::query(
             "INSERT INTO queue (run_id, priority, not_before) VALUES ($1, 5, $2)
@@ -5002,6 +5207,7 @@ this workflow manually."
             "a held run has not finished"
         );
         self.forget_cancel(run_id);
+        let why = reason.clone();
         let mut tx = self.db.pool.begin().await?;
         // `COALESCE`, because a cancel carries `reason: None` and the broker
         // may already have written the true one — "nobody answered the request
@@ -5073,6 +5279,29 @@ this workflow manually."
             .await?;
         }
         tx.commit().await?;
+        // An app's build that will not complete ends with its run. Settled at
+        // the tail of `execute_task_run` too, but the endings that never get
+        // there — a refusal at dispatch, a cancel before it started, a crash
+        // in `execute`, a run the reaper found lost — left the build reading
+        // `running`, and an app with a build running refuses every other
+        // change. A no-op for every other card, and for a build already
+        // settled.
+        if status != RunStatus::Completed {
+            if let Ok(Some(task_id)) =
+                sqlx::query_scalar::<_, Option<Uuid>>("SELECT task_id FROM runs WHERE id = $1")
+                    .bind(run_id)
+                    .fetch_optional(&self.db.pool)
+                    .await
+                    .map(Option::flatten)
+            {
+                if let Err(e) =
+                    apps::build::settle(&self.db, &self.worktrees, task_id, status, why.as_deref())
+                        .await
+                {
+                    tracing::warn!(%run_id, error = %e, "could not settle this app's build");
+                }
+            }
+        }
         // Every ending comes through here — completion, cancellation, a crash in
         // `execute`, a planning failure — which is why the epic mirror hangs off
         // `finish` rather than off the end of `work_phase`. A no-op unless the
@@ -5338,14 +5567,30 @@ mod tests {
     }
 
     /// The gate exists so a workflow can't grant itself more freedom than the
-    /// project allows. Down, never up.
+    /// project allows. Down, never up — and down as far as the engine can go,
+    /// which is not always Reviewed.
     #[test]
-    fn full_auto_is_cut_to_reviewed_when_the_project_has_not_opted_in() {
-        let r = resolve_step_permission(PermissionMode::FullAuto, false);
+    fn full_auto_steps_down_to_what_the_step_engine_can_honour() {
+        let claude = eren_engines::claude::ClaudeEngine::default().capabilities();
+        let codex = eren_engines::codex::CodexEngine::default().capabilities();
+        let amp = eren_engines::amp::AmpEngine::default().capabilities();
+
+        let r = resolve_step_permission(PermissionMode::FullAuto, false, &claude).unwrap();
         assert_eq!(r.mode, PermissionMode::Reviewed);
         assert!(r.downgraded, "the caller has to be able to tell this apart");
 
-        let r = resolve_step_permission(PermissionMode::FullAuto, true);
+        // Codex cannot stop to ask: Reviewed would reject every tool call.
+        let r = resolve_step_permission(PermissionMode::FullAuto, false, &codex).unwrap();
+        assert_eq!(r.mode, PermissionMode::AutoEdit);
+        assert!(r.downgraded);
+
+        // Amp has nothing narrower than every tool, so the step is refused.
+        assert_eq!(
+            resolve_step_permission(PermissionMode::FullAuto, false, &amp),
+            None
+        );
+
+        let r = resolve_step_permission(PermissionMode::FullAuto, true, &amp).unwrap();
         assert_eq!(r.mode, PermissionMode::FullAuto);
         assert!(!r.downgraded);
     }
@@ -5354,18 +5599,32 @@ mod tests {
     /// behalf, which is exactly what the compliance rules forbid.
     #[test]
     fn nothing_is_ever_raised_by_the_gate() {
-        for asked in [
-            PermissionMode::Reviewed,
-            PermissionMode::AutoEdit,
-            PermissionMode::FullAuto,
+        for caps in [
+            eren_engines::claude::ClaudeEngine::default().capabilities(),
+            eren_engines::codex::CodexEngine::default().capabilities(),
+            eren_engines::amp::AmpEngine::default().capabilities(),
         ] {
-            for gate in [true, false] {
-                let got = resolve_step_permission(asked, gate).mode;
-                assert!(
-                    got == asked
-                        || (asked == PermissionMode::FullAuto && got == PermissionMode::Reviewed),
-                    "{asked:?} with gate={gate} became {got:?}"
-                );
+            for asked in [
+                PermissionMode::Reviewed,
+                PermissionMode::AutoEdit,
+                PermissionMode::FullAuto,
+            ] {
+                for gate in [true, false] {
+                    let Some(got) = resolve_step_permission(asked, gate, &caps) else {
+                        assert_eq!(asked, PermissionMode::FullAuto);
+                        continue;
+                    };
+                    assert!(
+                        got.mode == asked || asked == PermissionMode::FullAuto,
+                        "{asked:?} with gate={gate} became {:?}",
+                        got.mode
+                    );
+                    assert_ne!(
+                        (gate, got.mode),
+                        (false, PermissionMode::FullAuto),
+                        "Full Auto without the gate"
+                    );
+                }
             }
         }
     }
@@ -5375,7 +5634,8 @@ mod tests {
     /// person can only act on the right one.
     #[test]
     fn a_step_that_asked_for_reviewed_is_not_reported_as_downgraded() {
-        let r = resolve_step_permission(PermissionMode::Reviewed, false);
+        let caps = eren_engines::claude::ClaudeEngine::default().capabilities();
+        let r = resolve_step_permission(PermissionMode::Reviewed, false, &caps).unwrap();
         assert_eq!(r.mode, PermissionMode::Reviewed);
         assert!(!r.downgraded);
     }
@@ -5526,6 +5786,70 @@ mod db_tests {
         t.finish().await;
     }
 
+    /// A card's run says which agent did it, so a reassignment afterwards
+    /// does not hand that agent's past work — its authorship, its spend — to
+    /// whoever holds the card now.
+    #[tokio::test]
+    async fn a_card_run_is_stamped_with_the_agent_that_did_it() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut orch = idle(&t, dir.path());
+        orch.register_engine(Arc::new(eren_engines::mock::MockEngine::demo()));
+        let (ws, project) = t.project(dir.path(), true).await;
+        let card = t.card(project, "stamped").await;
+        let agent = |name: &'static str| {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO agents (workspace_id, name, engine) VALUES ($1, $2, 'mock') RETURNING id",
+            )
+            .bind(ws)
+            .bind(name)
+            .fetch_one(&t.db.pool)
+        };
+        let ada = agent("Ada").await.unwrap();
+        let bo = agent("Bo").await.unwrap();
+        let assign = |who: Uuid| {
+            sqlx::query("UPDATE tasks SET agent_id = $2, worktree_path = $3 WHERE id = $1")
+                .bind(card)
+                .bind(who)
+                .bind(dir.path().to_string_lossy().to_string())
+                .execute(&t.db.pool)
+        };
+        let runs_as = |run: Uuid| {
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT agent_id FROM runs WHERE id = $1")
+                .bind(run)
+                .fetch_one(&t.db.pool)
+        };
+        assign(ada).await.unwrap();
+        let first = orch.enqueue_task(card).await.unwrap();
+        assert_eq!(runs_as(first).await.unwrap(), Some(ada));
+        sqlx::query("UPDATE runs SET status = 'completed' WHERE id = $1")
+            .bind(first)
+            .execute(&t.db.pool)
+            .await
+            .unwrap();
+
+        // Reassigned once the work is done: the run is still Ada's.
+        assign(bo).await.unwrap();
+        assert_eq!(runs_as(first).await.unwrap(), Some(ada));
+        let scope = crate::budgets::scope_of_run(&t.db, first).await.unwrap();
+        assert_eq!(scope.agent, Some(ada));
+
+        // And a follow-up is Bo's, who does it.
+        let next = orch
+            .enqueue_follow_up(
+                card,
+                crate::runs::follow_up::FollowUp::Handoff {
+                    note: "over to you".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs_as(next).await.unwrap(), Some(bo));
+        t.finish().await;
+    }
+
     /// The assistant and a team live on Eren's tools. An engine that cannot
     /// be handed them for one run is refused at the click — never started
     /// toolless — and the refusal names the installed engines that can.
@@ -5651,6 +5975,48 @@ mod db_tests {
         );
         orch.register_engine(Arc::new(eren_engines::codex::CodexEngine::default()));
         assert_eq!(orch.default_engine(), "codex");
+    }
+
+    /// A pass that must not write, on an engine with no mode for that, is
+    /// refused at the click — a plan-first card by `vet_card`, a drafting
+    /// call by `utility_run` — rather than by Amp once it starts.
+    #[tokio::test]
+    async fn read_only_work_on_an_engine_without_a_read_only_mode_is_refused_at_the_click() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut orch = idle(&t, dir.path());
+        orch.register_engine(Arc::new(eren_engines::amp::AmpEngine::default()));
+        let (_, project) = t.project(dir.path(), false).await;
+        let card = t.card(project, "plan me").await;
+        sqlx::query("UPDATE tasks SET engine = 'amp', permission_mode = 'full_auto', plan_first = TRUE WHERE id = $1")
+            .bind(card)
+            .execute(&t.db.pool)
+            .await
+            .unwrap();
+        let refused = orch.vet_card(card).await.unwrap().expect("refused");
+        assert!(refused.contains("plan first"), "{refused}");
+        sqlx::query("UPDATE tasks SET plan_first = FALSE WHERE id = $1")
+            .bind(card)
+            .execute(&t.db.pool)
+            .await
+            .unwrap();
+        let other = orch.vet_card(card).await.unwrap().unwrap_or_default();
+        assert!(!other.contains("plan first"), "{other}");
+
+        let err = crate::runs::utility::utility_run(
+            &t.db,
+            Arc::new(eren_engines::amp::AmpEngine::default()),
+            "medium".into(),
+            "draft a skill".into(),
+            None,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is::<CantHonour>(), "{err}");
+        t.finish().await;
     }
 
     /// Gemini's aliases and Amp's modes are their own catalogs; the keyword

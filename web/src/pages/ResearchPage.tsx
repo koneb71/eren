@@ -13,6 +13,7 @@ import { isActive } from "../lib/runStatus";
 import { Button, buttonClasses } from "../components/ui/Button";
 import { Select } from "../components/ui/Field";
 import { toolName } from "../lib/brand";
+import { readStored, writeStored } from "../lib/storage";
 
 /**
  * Deep research: ask a question about a project, watch the investigation,
@@ -56,7 +57,7 @@ export default function ResearchPage() {
       .then((r) => {
         setProjects(r.projects);
         const fromUrl = params.get("project");
-        const remembered = localStorage.getItem(PROJECT_KEY);
+        const remembered = readStored(PROJECT_KEY);
         // General is the default: a question does not need a repository, and
         // a general research answers it from the web alone.
         const pick =
@@ -91,7 +92,7 @@ export default function ResearchPage() {
 
   const pickProject = (id: string) => {
     setProjectId(id);
-    localStorage.setItem(PROJECT_KEY, id);
+    writeStored(PROJECT_KEY, id);
     setParams({ project: id }, { replace: true });
     navigate(`/research?project=${id}`);
   };
@@ -172,7 +173,7 @@ export default function ResearchPage() {
         const target = pid ?? GENERAL;
         if (target !== projectId) {
           setProjectId(target);
-          localStorage.setItem(PROJECT_KEY, target);
+          writeStored(PROJECT_KEY, target);
         }
       }}
     />

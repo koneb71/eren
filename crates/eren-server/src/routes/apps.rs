@@ -225,6 +225,7 @@ async fn generate(
     // No tools and no project directory: this writes text, and a run that
     // cannot touch the filesystem cannot get that wrong in an interesting way.
     let output = eren_core::runs::utility::utility_run(
+        &state.db,
         engine,
         model_id,
         apps::scaffold::manifest_prompt(description, runtime),
@@ -232,7 +233,7 @@ async fn generate(
         std::time::Duration::from_secs(180),
     )
     .await
-    .map_err(internal)?;
+    .map_err(super::run_refused)?;
 
     let manifest = apps::scaffold::extract(&output);
     let error = apps::manifest::parse(&manifest)
@@ -391,11 +392,26 @@ async fn change(
         .await
         .map_err(internal)?;
 
-    let run_id = state
-        .orchestrator
-        .enqueue_task(task_id)
-        .await
-        .map_err(super::run_refused)?;
+    // Recorded before the enqueue because `base_commit` has to be read before
+    // the card has a run — so a refused enqueue has to end the build here, or
+    // it reads `running` forever and the app refuses every later change.
+    let run_id = match state.orchestrator.enqueue_task(task_id).await {
+        Ok(run_id) => run_id,
+        Err(e) => {
+            if let Err(settle) = apps::build::settle(
+                &state.db,
+                &state.orchestrator.worktrees,
+                task_id,
+                eren_shared::RunStatus::Failed,
+                Some(&e.to_string()),
+            )
+            .await
+            {
+                tracing::warn!(%task_id, error = %settle, "could not end a build that never started");
+            }
+            return Err(super::run_refused(e));
+        }
+    };
     sqlx::query("UPDATE tasks SET board_column='running' WHERE id=$1")
         .bind(task_id)
         .execute(&state.db.pool)

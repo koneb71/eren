@@ -493,31 +493,55 @@ pub async fn pending_plan(db: &Db, app_id: Uuid) -> anyhow::Result<Option<Pendin
 /// Scoped to the app the request names: a plan id alone would let one app's
 /// page apply another app's migration.
 pub async fn apply_plan(db: &Db, app_id: Uuid, plan_id: Uuid) -> anyhow::Result<Vec<Stmt>> {
-    let row = sqlx::query(
-        "SELECT statements FROM app_schema_plans WHERE id = $1 AND app_id = $2 AND status = 'pending'",
+    // Claimed, not read: the status check is in the WHERE of the write, so of
+    // two approvals racing — the app page and the inbox, a double click — one
+    // runs the DDL and the other is told it has been dealt with.
+    let statements: serde_json::Value = sqlx::query_scalar(
+        "UPDATE app_schema_plans SET status = 'applying'
+          WHERE id = $1 AND app_id = $2 AND status = 'pending'
+        RETURNING statements",
     )
     .bind(plan_id)
     .bind(app_id)
-            .fetch_optional(&db.pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("that change has already been dealt with"))?;
-    use sqlx::Row;
-    let statements: Vec<Stmt> = serde_json::from_value(row.get("statements"))?;
+    .fetch_optional(&db.pool)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("that change has already been dealt with"))?;
+    let statements: Vec<Stmt> = match serde_json::from_value(statements) {
+        Ok(s) => s,
+        Err(e) => {
+            settle_plan(db, plan_id, "failed", Some(&e.to_string())).await?;
+            return Err(e.into());
+        }
+    };
 
     if let Err(e) = run(db, &statements).await {
-        sqlx::query("UPDATE app_schema_plans SET status = 'failed', error = $2 WHERE id = $1")
-            .bind(plan_id)
-            .bind(e.to_string())
-            .execute(&db.pool)
-            .await?;
+        settle_plan(db, plan_id, "failed", Some(&e.to_string())).await?;
         return Err(e);
     }
-
-    sqlx::query("UPDATE app_schema_plans SET status = 'applied', applied_at = now() WHERE id = $1")
-        .bind(plan_id)
-        .execute(&db.pool)
-        .await?;
+    settle_plan(db, plan_id, "applied", None).await?;
     Ok(statements)
+}
+
+/// Record how a claimed plan went — only against the claim, so nothing but
+/// the apply that took it can write its outcome.
+async fn settle_plan(
+    db: &Db,
+    plan_id: Uuid,
+    status: &str,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE app_schema_plans
+            SET status = $2, error = $3,
+                applied_at = CASE WHEN $2 = 'applied' THEN now() ELSE applied_at END
+          WHERE id = $1 AND status = 'applying'",
+    )
+    .bind(plan_id)
+    .bind(status)
+    .bind(error)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
 }
 
 /// Turn down a proposed migration. The app keeps the tables it has.
@@ -721,5 +745,66 @@ mod tests {
     fn the_digest_changes_when_the_text_does() {
         assert_eq!(digest("a"), digest("a"));
         assert_ne!(digest("a"), digest("a "));
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::testdb;
+
+    /// Two approvals of one plan — the app page and the inbox, or a double
+    /// click — run its DDL once. The second is told it has been dealt with,
+    /// and nothing it does can rewrite the first one's outcome.
+    #[tokio::test]
+    async fn a_plan_is_applied_once() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, project) = t.project(dir.path(), false).await;
+        let app: Uuid = sqlx::query_scalar(
+            "INSERT INTO apps (project_id, workspace_id, slug, name, schema_name, manifest,
+                               manifest_sha256)
+             VALUES ($1, $2, 'probe', 'Probe', 'app_probe', '', '') RETURNING id",
+        )
+        .bind(project)
+        .bind(ws)
+        .fetch_one(&t.db.pool)
+        .await
+        .unwrap();
+        let plan: Uuid = sqlx::query_scalar(
+            "INSERT INTO app_schema_plans (app_id, statements, destructive)
+             VALUES ($1, $2, TRUE) RETURNING id",
+        )
+        .bind(app)
+        .bind(serde_json::json!([
+            { "sql": "CREATE TABLE plan_probe (id int)", "destructive": true, "why": "probe" }
+        ]))
+        .fetch_one(&t.db.pool)
+        .await
+        .unwrap();
+
+        let (a, b) = tokio::join!(apply_plan(&t.db, app, plan), apply_plan(&t.db, app, plan));
+        let (won, lost) = match (a, b) {
+            (Ok(s), Err(e)) | (Err(e), Ok(s)) => (s, e),
+            (a, b) => panic!("expected one apply and one refusal, got {a:?} and {b:?}"),
+        };
+        assert_eq!(won.len(), 1);
+        assert!(
+            lost.to_string().contains("already been dealt with"),
+            "{lost}"
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM app_schema_plans WHERE id = $1")
+                .bind(plan)
+                .fetch_one(&t.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "applied");
+        assert!(apply_plan(&t.db, app, plan).await.is_err());
+        assert!(discard_plan(&t.db, app, plan).await.is_err());
+        assert!(pending_plan(&t.db, app).await.unwrap().is_none());
+        t.finish().await;
     }
 }

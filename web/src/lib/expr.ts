@@ -257,7 +257,9 @@ export function evaluate(ast: Ast, record: Record_, now: string): Val {
       const bare = ast.name.startsWith("record.") ? ast.name.slice(7) : ast.name;
       // Absent is null, not an error: a record is often half-filled, and
       // `category == ''` should say "not yet" rather than blow up.
-      return bare in record ? record[bare] : null;
+      // Own properties only: `in` also sees what every object inherits, so a
+      // field called `constructor` or `toString` read back a function.
+      return Object.hasOwn(record, bare) ? record[bare] : null;
     }
     case "unary": {
       const a = evaluate(ast.a, record, now);
@@ -352,9 +354,14 @@ function call(name: string, args: Val[], now: string): Val {
     case "abs":
       return Math.abs(num(0));
     case "round": {
+      // As the Rust does it: places clamped to 0..=10 and then truncated
+      // (`as i32`, which also makes NaN 0), and halves rounded away from zero
+      // (`f64::round`) — Math.round rounds them up, so -2.5 became -2.
       const places = args.length > 1 ? num(1) : 0;
-      const f = Math.pow(10, Math.min(Math.max(places, 0), 10));
-      return Math.round(num(0) * f) / f;
+      const whole = Math.trunc(Math.min(Math.max(places, 0), 10)) || 0;
+      const f = Math.pow(10, whole);
+      const x = num(0) * f;
+      return (Math.sign(x) * Math.round(Math.abs(x))) / f;
     }
     case "coalesce":
       return args.find((v) => v !== null) ?? null;

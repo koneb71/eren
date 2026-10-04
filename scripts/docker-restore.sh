@@ -58,7 +58,9 @@ if [ "$YES" != 1 ]; then
     exit 1
 fi
 
-./scripts/docker-backup.sh --label pre-restore
+# KEEP=0: this backup prunes nothing. With the folder full, pruning to make
+# room would remove the oldest backup — which may be the very one $FROM names.
+EREN_BACKUP_KEEP=0 ./scripts/docker-backup.sh --label pre-restore
 
 echo "→ stopping eren"
 docker stop eren >/dev/null
@@ -72,10 +74,12 @@ echo "→ restoring the database"
 # everything rather than what the dump names (pg_restore --clean) is what
 # makes an older backup restore exactly: tables a later migration added would
 # otherwise survive beside a migration history that says they do not exist.
-# One transaction, so a restore that fails leaves the database as it was.
+# One transaction, so a restore that fails leaves the database as it was —
+# which takes `-f -`: psql honours --single-transaction only for -c and -f,
+# and on a plain stdin pipe the DROP would commit on its own.
 docker exec -i eren-postgres sh -c '
     { echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"; pg_restore --no-owner -f -; } |
-        psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 --single-transaction >/dev/null' \
+        psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 --single-transaction -f - >/dev/null' \
     <"$FROM/db.dump"
 echo "  ✓ database"
 

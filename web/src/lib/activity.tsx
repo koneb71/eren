@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Activity, api } from "./api";
 import { useWorkspace } from "./workspace";
+import { readStored, writeStored } from "./storage";
 
 /**
  * One poll of `/api/activity`, shared by everything that needs it.
@@ -60,7 +61,7 @@ export function notificationsOn(): boolean {
   return (
     typeof Notification !== "undefined" &&
     Notification.permission === "granted" &&
-    localStorage.getItem(STORAGE_KEY) === "on"
+    readStored(STORAGE_KEY) === "on"
   );
 }
 
@@ -68,7 +69,7 @@ export function notificationsOn(): boolean {
  *  isn't tied to a user gesture. Returns the resulting on/off state. */
 export async function toggleNotifications(on: boolean): Promise<boolean> {
   if (!on) {
-    localStorage.setItem(STORAGE_KEY, "off");
+    writeStored(STORAGE_KEY, "off");
     return false;
   }
   if (typeof Notification === "undefined") return false;
@@ -76,7 +77,7 @@ export async function toggleNotifications(on: boolean): Promise<boolean> {
     Notification.permission === "granted"
       ? "granted"
       : await Notification.requestPermission();
-  localStorage.setItem(STORAGE_KEY, permission === "granted" ? "on" : "off");
+  writeStored(STORAGE_KEY, permission === "granted" ? "on" : "off");
   return permission === "granted";
 }
 

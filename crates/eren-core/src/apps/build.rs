@@ -446,3 +446,46 @@ mod tests {
         assert!(long.len() < 90, "a subject line that long is a paragraph");
     }
 }
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::testdb;
+
+    /// A build whose run never gets to the end of `execute_task_run` — here,
+    /// cancelled while still queued — ends with it, rather than reading
+    /// `running` forever and refusing every later change to the app.
+    #[tokio::test]
+    async fn a_build_ends_with_a_run_that_never_got_going() {
+        let Some(t) = testdb::fresh().await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let orch = t.orchestrator(dir.path());
+        orch.set_queue_paused(true).await.unwrap();
+        let (ws, project) = t.project(dir.path(), false).await;
+        let app: Uuid = sqlx::query_scalar(
+            "INSERT INTO apps (project_id, workspace_id, slug, name, schema_name, manifest,
+                               manifest_sha256)
+             VALUES ($1, $2, 'built', 'Built', 'app_built', '', '') RETURNING id",
+        )
+        .bind(project)
+        .bind(ws)
+        .fetch_one(&t.db.pool)
+        .await
+        .unwrap();
+        let card = t.card(project, "make the header blue").await;
+        let build = record(&t.db, app, card, "make the header blue", Some("abc"))
+            .await
+            .unwrap();
+        assert!(in_progress(&t.db, app).await.unwrap().is_some());
+
+        let run = orch.enqueue_task(card).await.unwrap();
+        orch.cancel_idle(run).await.unwrap();
+
+        let b = get(&t.db, build).await.unwrap().unwrap();
+        assert_eq!(b.status, "failed");
+        assert!(in_progress(&t.db, app).await.unwrap().is_none());
+        t.finish().await;
+    }
+}
