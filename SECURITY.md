@@ -256,12 +256,12 @@ subprocess. Some namespaces are there for more than keys: `OPENCODE_CONFIG*` and
 and several of the newer CLIs carry settings in their namespace that would change how they run.
 
 **What Eren itself holds.** A spawned CLI inherits the server's whole environment, so the
-credentials Eren owns — `OWN_SECRETS`, currently the object-storage access and secret keys — are
-stripped from every child process: engines, `git` (whose repository hooks inherit the
+credentials Eren owns — `OWN_SECRETS`: the object-storage access and secret keys and the access
+token — are stripped from every child process: engines, `git` (whose repository hooks inherit the
 environment), `docker`, `gh`, every `--version` probe, the MCP test button, the attention hook
 and the skills installer alike. Each key is read under two names, so `own_secrets()` spells out
-both: `EREN_S3_ACCESS_KEY`, `EREN_S3_SECRET_KEY`, and the pre-rename `AICHIP_S3_ACCESS_KEY` and
-`AICHIP_S3_SECRET_KEY` that Eren still reads. A test also checks that everything Eren owns reads
+both: `EREN_S3_ACCESS_KEY`, `EREN_S3_SECRET_KEY`, `EREN_ACCESS_TOKEN`, and the pre-rename
+`AICHIP_S3_ACCESS_KEY`, `AICHIP_S3_SECRET_KEY` and `AICHIP_ACCESS_TOKEN` that Eren still reads. A test also checks that everything Eren owns reads
 as a secret to `is_auth_env`, so it can never be handed back through a run's extra variables.
 `DATABASE_URL` is stripped too (`OWN_UNPREFIXED`, under that one name): it is the database Eren
 itself runs on, password included, and a project's test suite run as a check would otherwise
@@ -272,6 +272,15 @@ That list is deliberately narrow. Your own provider variables are yours and are 
 because OpenCode authenticates some providers from the environment on purpose, and Amp's
 headless runs read `AMP_API_KEY` from yours. Eren passes your environment through; it never
 adds to it.
+
+Two children get less than that, through `env_guard::command_without_auth`, which also drops
+every inherited variable `is_auth_env` matches: a project's **checks**, and Eren's own **git**
+commands (commit, merge, checkout, worktree). Both run code the agent wrote — a `package.json`
+script, the tests themselves, a repository hook — as the server, and an Auto-edit agent that
+was refused Bash can still write a test. Eren's git also runs with repository hooks disabled
+(`core.hooksPath` pointed at a directory that does not exist), so a hook planted in `.git/hooks`
+runs on nothing Eren does. A test suite that needs a key reads it from a file of its own; your
+engines still get your environment.
 
 **`env_guard::command` is the only way anything in the workspace starts a process.** Stripping
 used to be something each spawn site remembered, and most forgot. Now `std::process::Command::new`

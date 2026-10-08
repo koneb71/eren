@@ -644,6 +644,10 @@ run in a card's worktree after an agent finishes. Two rules are easy to break:
   `run_checks_after_every_run`.** They execute code the agent may have edited, so otherwise
   a person clicks "Run checks" and that click is the consent. The same goes for the bounded
   auto-fix (`POST /tasks/{id}/checks/fix`).
+- **A check sees none of the person's credentials.** It starts through
+  `env_guard::command_without_auth`, which also drops every inherited variable
+  `is_auth_env` matches; so does every `git` Eren runs (`worktrees::manager::git`), with
+  repository hooks disabled — both run code an agent wrote, as the server.
 
 **Landing** (`eren_core::landing`, migration 0073): a card blocked by another waits for it
 to reach *done*. Six things write `done` and share no code path, so the seam is

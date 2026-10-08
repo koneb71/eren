@@ -6,6 +6,9 @@
 //! 2. Never read, store, extract, or forward credentials. Never touch `~/.claude`
 //!    or any engine's config/credential files.
 //! 3. Never set authentication environment variables on spawned processes.
+//!    (The person's own are passed through to an engine; a check or a git
+//!    hook, which runs agent-written code, gets none of them —
+//!    `env_guard::command_without_auth`.)
 //! 4. Never proxy, intercept, or replay the engine's network traffic.
 
 pub mod amp;

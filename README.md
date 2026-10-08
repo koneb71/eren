@@ -340,7 +340,10 @@ you review work that is known to pass. Two rules decide everything about them:
 
 Each check runs in its own process group with `CI=1` and `NO_COLOR=1`, so a timeout kills
 the whole tree — `cargo test` and the test binaries it started, not just the `sh` in front
-of them.
+of them — and without your provider keys, tokens and passwords: a check runs code the agent
+wrote, and an Auto-edit agent that cannot run Bash can still write a test. A suite that needs
+a key reads it from a file of its own. Eren's own `git` commands run the same way, and with
+the repository's hooks disabled.
 
 A **follow-up** ([`runs/follow_up.rs`](crates/eren-core/src/runs/follow_up.rs)) is a run that
 goes back into a card's existing worktree to act on something said *about* its diff, so the

@@ -69,6 +69,38 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command 
     cmd
 }
 
+/// Remove from `cmd` every inherited variable that [`is_auth_env`] would
+/// refuse to set: the person's own provider keys, tokens and passwords.
+///
+/// Not for an engine — the person's credentials are theirs to give an engine,
+/// and OpenCode and Amp read theirs from the environment on purpose. For a
+/// process that runs code an agent may have edited in a shell that is not the
+/// agent's own: a project's checks (`package.json` scripts, `build.rs`, the
+/// tests themselves) and the repository hooks Eren's own `git` would run. An
+/// Auto-edit agent has no shell, but it can write a test; a check then runs it
+/// with the server's whole environment, and that is a shell with every key in
+/// it. `inherited` is the names to consider — `std::env::vars_os` at the spawn
+/// site, or a list in a test.
+pub fn strip_auth_env(
+    cmd: &mut tokio::process::Command,
+    inherited: impl IntoIterator<Item = String>,
+) {
+    for key in inherited {
+        if is_auth_env(&key) {
+            cmd.env_remove(key);
+        }
+    }
+}
+
+/// [`command`], minus every auth-shaped variable the server inherited as
+/// well: for checks and git, which run code an agent may have written.
+pub fn command_without_auth(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = command(program);
+    let inherited = std::env::vars_os().filter_map(|(k, _)| k.into_string().ok());
+    strip_auth_env(&mut cmd, inherited);
+    cmd
+}
+
 /// Fragments that make a name look like a secret regardless of vendor.
 const SECRET_SUBSTRINGS: &[&str] = &[
     "API_KEY",
@@ -327,9 +359,40 @@ mod own_secret_tests {
         }
     }
 
+    /// A check or a git hook runs code an agent may have written, in a shell
+    /// that is not the agent's own, so it gets none of the person's keys —
+    /// and everything that is not a key, untouched.
+    #[test]
+    fn a_process_for_agent_edited_code_gets_no_auth_shaped_variable() {
+        let mut cmd = command("true");
+        strip_auth_env(
+            &mut cmd,
+            ["OPENAI_API_KEY", "ACME_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "PATH", "NODE_ENV"]
+                .map(String::from),
+        );
+        let removed: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for key in ["OPENAI_API_KEY", "ACME_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            assert!(removed.contains(&key.to_string()), "{key} was kept");
+        }
+        for key in ["PATH", "NODE_ENV"] {
+            assert!(!removed.contains(&key.to_string()), "{key} was removed");
+        }
+        // Eren's own are gone too, from `command` underneath.
+        for key in own_secrets() {
+            assert!(removed.contains(&key), "{key} was kept");
+        }
+    }
+
     /// The user's own provider credentials are theirs. OpenCode authenticates
     /// some providers from the environment by design, so stripping these would
-    /// break working installs to solve a problem Eren didn't create.
+    /// break working installs to solve a problem Eren didn't create. (Checks
+    /// and Eren's own git are the exception, through `command_without_auth`:
+    /// they run code an agent wrote.)
     #[test]
     fn the_users_own_credentials_are_left_alone() {
         for key in [

@@ -1289,9 +1289,27 @@ pub async fn stash(repo: &Path, message: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where Eren's git looks for hooks: a directory that does not exist, so it
+/// finds none. Under Eren's home rather than `/dev/null`, which is not a
+/// directory on every platform git runs on.
+fn no_hooks_path() -> std::path::PathBuf {
+    eren_shared::brand::home().join("no-hooks")
+}
+
+/// Every git command Eren runs: commits, merges, checkouts, worktrees.
+///
+/// Two things it does not inherit. **Repository hooks**: Eren's commits in a
+/// worktree and its squash-merges in the person's checkout are mechanical,
+/// and a hook that ran there ran as the server — `files.rs` refuses to write
+/// `.git/hooks` for exactly that reason, and an agent with a shell can plant
+/// one just the same. **The person's provider keys**
+/// (`env_guard::command_without_auth`): a hook, and anything git itself
+/// starts, would otherwise hold every one of them.
 pub(crate) async fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let out = env_guard::command("git")
+    let hooks = format!("core.hooksPath={}", no_hooks_path().display());
+    let out = env_guard::command_without_auth("git")
         .current_dir(cwd)
+        .args(["-c", &hooks])
         .args(args)
         .output()
         .await?;
@@ -1353,6 +1371,34 @@ mod tests {
         git(repo, &["commit", "-m", &format!("main: {file}")])
             .await
             .unwrap();
+    }
+
+    /// A hook in the repository is code Eren did not write, run as the
+    /// server: a `pre-commit` that fails must not stop Eren's commit, and a
+    /// `post-commit` must not run at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn erens_git_runs_no_repository_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path()).await;
+        let hooks = repo.path().join(".git/hooks");
+        let marker = repo.path().join("hook-ran");
+        for (name, body) in [
+            ("pre-commit", "#!/bin/sh\nexit 1\n".to_string()),
+            (
+                "post-commit",
+                format!("#!/bin/sh\ntouch {}\n", marker.display()),
+            ),
+        ] {
+            let path = hooks.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git(repo.path(), &["commit", "--allow-empty", "-m", "mechanical"])
+            .await
+            .expect("a failing pre-commit hook does not stop Eren's commit");
+        assert!(!marker.exists(), "the post-commit hook ran");
     }
 
     /// The bug: diffing against the base's *tip* showed every commit landed

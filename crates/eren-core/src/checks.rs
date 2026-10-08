@@ -16,9 +16,13 @@
 //! after an Auto-edit run would hand an agent that was refused Bash a way to
 //! execute anything, with no prompt.
 //!
-//! Every spawn goes through `env_guard::command`, in its own process group, so
-//! a timeout kills the whole tree — `cargo test` and the test binaries it
-//! started, not just the `sh` in front of them.
+//! Every spawn goes through `env_guard::command_without_auth`, in its own
+//! process group, so a timeout kills the whole tree — `cargo test` and the
+//! test binaries it started, not just the `sh` in front of them — and so the
+//! code a check runs sees none of the person's provider keys, tokens or
+//! passwords: that code is the agent's, and an Auto-edit agent that cannot run
+//! Bash can still write a test. A suite that needs a key reads it from a file
+//! of its own.
 
 use crate::db::Db;
 use crate::worktrees::manager;
@@ -110,7 +114,7 @@ pub async fn run_one(dir: &Path, check: &Check, timeout: Duration) -> CheckResul
         output_tail,
     };
 
-    let mut cmd = env_guard::command("sh");
+    let mut cmd = env_guard::command_without_auth("sh");
     // One stream, in the order it was written. Read from two pipes, a test
     // runner's "FAILED" on stderr lands before the stdout lines that led to
     // it, and the log reads backwards. `exec 2>&1` first makes the shell — and
@@ -712,6 +716,23 @@ mod tests {
                 r.output_tail
             );
         }
+    }
+
+    /// A check runs code the agent wrote. The person's own keys are not for
+    /// it — unlike an engine, which is given them on purpose.
+    #[tokio::test]
+    async fn a_check_does_not_inherit_a_provider_key() {
+        let dir = tempfile::tempdir().unwrap();
+        // A name no other test sets, so it cannot race one that unsets it.
+        std::env::set_var("EREN_CHECK_TEST_FAKE_API_KEY", "would-leak");
+        std::env::set_var("EREN_CHECK_TEST_PLAIN", "kept");
+        let r = run_one(
+            dir.path(),
+            &check("printf 'key=%s;plain=%s;' \"$EREN_CHECK_TEST_FAKE_API_KEY\" \"$EREN_CHECK_TEST_PLAIN\""),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(r.output_tail.contains("key=;plain=kept;"), "{}", r.output_tail);
     }
 
     #[test]
