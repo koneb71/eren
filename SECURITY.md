@@ -49,7 +49,16 @@ What holds that together is the bind address:
 - Dashboard responses carry `X-Frame-Options: DENY` and `frame-ancestors 'none'`, because the UI
   is made of one-click irreversible actions — a permission prompt's **Allow**, a squash-merge —
   and an invisible iframe positioned under something innocuous would collect one of those clicks.
-  Previews and apps are meant to be embedded and deliberately sit outside that layer.
+  The policy is appended, so a handler's stricter one (an attachment download's
+  `default-src 'none'; sandbox`) is enforced beside it; every response also gets
+  `X-Content-Type-Options: nosniff` and a `Referrer-Policy` of `same-origin` where the handler
+  set none. Previews and apps are meant to be embedded and deliberately sit outside that layer.
+- A URL the dashboard did not make — an agent's `WebFetch` argument, a GitHub record, a server-
+  supplied address — becomes a link only when `safeHttpUrl` (`web/src/lib/url.ts`) says it is
+  `http` or `https`; React only warns about a `javascript:` href and renders it anyway.
+- Stored knowledge-base HTML keeps `class` on a code block (`language-…`, one token) and on an
+  image (`kb-image`) and nowhere else: the bundle contains `fixed inset-0`, and a free `class`
+  would let a page draw over the dashboard it is rendered in.
 
 ### The write header
 

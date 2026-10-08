@@ -6,6 +6,7 @@ import { Page, PageHead } from "../components/ui/Surface";
 import { Icon } from "../components/ui/Icon";
 import { Button, buttonClasses } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
+import { safeHttpUrl } from "../lib/url";
 
 /**
  * MCP servers the user connects.
@@ -203,7 +204,7 @@ function GitHubCard() {
               {copied ? "copied" : "copy"}
             </Button>
             <a
-              href={flow.url}
+              href={safeHttpUrl(flow.url)}
               target="_blank"
               rel="noreferrer"
               className={buttonClasses({ variant: "primary", size: "xs" })}

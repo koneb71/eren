@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, DockerStatus, previewUrl, TaskPreview } from "../lib/api";
 import { Button } from "./ui/Button";
+import { safeHttpUrl } from "../lib/url";
 
 /**
  * Start this card's preview, and reach it.
@@ -82,7 +83,7 @@ export function PreviewPanel({
       {live && url && (
         <>
           <a
-            href={url}
+            href={safeHttpUrl(url)}
             target="_blank"
             rel="noreferrer"
             className="font-medium text-accent-fg hover:underline"

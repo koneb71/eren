@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type GitHubIssue } from "../lib/api";
 import { Dialog } from "./ui/Dialog";
 import { Button } from "./ui/Button";
+import { safeHttpUrl } from "../lib/url";
 
 /**
  * Turn GitHub issues into board cards.
@@ -179,7 +180,7 @@ export function ImportIssuesModal({
                   )}
                 </div>
                 <a
-                  href={issue.url}
+                  href={safeHttpUrl(issue.url)}
                   target="_blank"
                   rel="noreferrer"
                   className="shrink-0 text-[11px] text-fg-muted hover:text-fg"

@@ -14,6 +14,7 @@ import { Button, buttonClasses } from "../components/ui/Button";
 import { Select } from "../components/ui/Field";
 import { toolName } from "../lib/brand";
 import { readStored, writeStored } from "../lib/storage";
+import { safeHttpUrl } from "../lib/url";
 
 /**
  * Deep research: ask a question about a project, watch the investigation,
@@ -536,7 +537,9 @@ function LiveInvestigation({
             return (
               <motion.a
                 key={`${e.seq}-${i}`}
-                href={url}
+                // The model chose this URL; a `javascript:` one is a click
+                // away from running on this origin.
+                href={safeHttpUrl(url)}
                 target="_blank"
                 rel="noreferrer"
                 initial={{ opacity: 0, x: -6 }}

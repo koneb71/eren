@@ -59,7 +59,25 @@ pub fn article_html(html: &str) -> String {
         // lost on the next save.
         .add_tag_attributes("ul", ["data-type"])
         .add_tag_attributes("li", ["data-checked"])
-        .add_generic_attributes(["style", "class", "colspan", "rowspan"]);
+        // `class` on exactly two elements, and filtered below: the dashboard
+        // bundle contains utilities like `fixed inset-0`, so a free `class`
+        // would let a stored page draw over the UI it is rendered in.
+        .add_tag_attributes("code", ["class"])
+        .add_tag_attributes("img", ["class"])
+        .add_generic_attributes(["style", "colspan", "rowspan"]);
+    builder.attribute_filter(|element, attribute, value| {
+        if attribute != "class" {
+            return Some(value.into());
+        }
+        let keep = match element {
+            // What the editor's code block emits, and what the page's
+            // highlighter reads.
+            "code" => is_language_class(value),
+            "img" => value == "kb-image",
+            _ => false,
+        };
+        keep.then(|| value.into())
+    });
 
     // Editors emit inline styles constantly — alignment, column widths. Ammonia
     // does NOT filter style *declarations* unless told which to keep, so
@@ -106,6 +124,19 @@ pub fn article_html(html: &str) -> String {
 
     let cleaned = builder.clean(html).to_string();
     strip_foreign_iframes(&cleaned)
+}
+
+/// `language-rust`, `language-c++`, `language-objective-c`: one class, with
+/// nothing in it the stylesheet could be made to act on.
+fn is_language_class(value: &str) -> bool {
+    value
+        .strip_prefix("language-")
+        .is_some_and(|lang| {
+            (1..=40).contains(&lang.len())
+                && lang
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '#' | '.' | '-'))
+        })
 }
 
 /// Drop any `<iframe>` whose `src` isn't on the embed allowlist.
@@ -294,6 +325,39 @@ mod tests {
         assert!(!clean.contains("onclick"), "{clean}");
         assert!(!clean.contains("<input"), "{clean}");
         assert!(clean.contains(r#"data-checked="true""#), "{clean}");
+    }
+
+    /// The editor emits `<code class="language-x">` and the page's
+    /// highlighter reads it; that one class, with that shape, survives.
+    #[test]
+    fn a_code_block_keeps_its_language_class() {
+        let clean = article_html(r#"<pre><code class="language-rust">fn x() {}</code></pre>"#);
+        assert!(clean.contains(r#"class="language-rust""#), "{clean}");
+        let clean = article_html(r#"<img src="https://x/y.png" class="kb-image">"#);
+        assert!(clean.contains(r#"class="kb-image""#), "{clean}");
+    }
+
+    /// The bundle has `fixed inset-0 z-40` in it; a stored page must not be
+    /// able to borrow them and draw over the dashboard.
+    #[test]
+    fn a_class_that_is_not_a_language_is_dropped() {
+        for dirty in [
+            r#"<p class="fixed inset-0 z-40">x</p>"#,
+            r#"<div class="fixed">x</div>"#,
+            r#"<code class="language-rust fixed">x</code>"#,
+            r#"<code class="fixed">x</code>"#,
+            r#"<code class="language-">x</code>"#,
+            r#"<img src="https://x/y.png" class="fixed inset-0">"#,
+            r#"<a href="https://e.com" class="kb-image">l</a>"#,
+        ] {
+            let clean = article_html(dirty);
+            assert!(!clean.contains("class="), "{dirty} → {clean}");
+        }
+        assert!(is_language_class("language-c++"));
+        assert!(is_language_class("language-objective-c"));
+        assert!(!is_language_class("language-"));
+        assert!(!is_language_class("language-rust fixed"));
+        assert!(!is_language_class(&format!("language-{}", "x".repeat(41))));
     }
 
     #[test]

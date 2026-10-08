@@ -149,16 +149,36 @@ async fn refuse_to_be_framed(
     next: Next,
 ) -> axum::response::Response {
     let mut res = next.run(req).await;
-    let headers = res.headers_mut();
-    headers.insert(
-        axum::http::header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
-    );
-    headers.insert(
-        axum::http::header::CONTENT_SECURITY_POLICY,
+    harden(res.headers_mut());
+    res
+}
+
+/// The headers every dashboard response carries.
+///
+/// The policy is *appended*, not inserted: a browser enforces every
+/// `Content-Security-Policy` header it receives, so a handler's stricter one
+/// — the attachment download's `default-src 'none'; sandbox` — survives
+/// alongside this one. (It used to be replaced, which quietly undid it.)
+/// `nosniff` keeps a response served as text from being run as script;
+/// `Referrer-Policy` is set only where a handler set none, so the access
+/// link's `no-referrer` stands.
+pub(crate) fn harden(headers: &mut axum::http::HeaderMap) {
+    use axum::http::header;
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.append(
+        header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("frame-ancestors 'none'"),
     );
-    res
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    if !headers.contains_key(header::REFERRER_POLICY) {
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("same-origin"),
+        );
+    }
 }
 
 /// The host part of a `Host` or `Origin` value, without the port.
@@ -416,6 +436,37 @@ mod tests {
         // And the safer way to be reachable at all.
         assert!(message.contains(ACCESS_TOKEN), "{message}");
         assert_eq!(ACCESS_TOKEN, eren_shared::brand::env_name("ACCESS_TOKEN"));
+    }
+
+    /// A handler's own, stricter policy is enforced beside this one, never
+    /// replaced by it.
+    #[test]
+    fn the_attachment_policy_survives_the_frame_header() {
+        use axum::http::header;
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+        h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        harden(&mut h);
+        let policies: Vec<&str> = h
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            policies,
+            ["default-src 'none'; sandbox", "frame-ancestors 'none'"]
+        );
+        assert_eq!(h.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
+        assert_eq!(h.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+
+        let mut plain = axum::http::HeaderMap::new();
+        harden(&mut plain);
+        assert_eq!(plain.get(header::REFERRER_POLICY).unwrap(), "same-origin");
+        assert_eq!(plain.get_all(header::CONTENT_SECURITY_POLICY).iter().count(), 1);
     }
 
     /// `EREN_TRUST_NETWORK=false` is somebody saying no, not yes.

@@ -4,6 +4,7 @@ import { api, type PullRequestState } from "../lib/api";
 import { PublishModal } from "./PublishModal";
 import { Button } from "./ui/Button";
 import { prSummary, prTone, shouldPoll, syncedLabel } from "../lib/pullRequest";
+import { safeHttpUrl } from "../lib/url";
 
 /**
  * Finishing a card as a pull request, and what became of it.
@@ -110,7 +111,7 @@ export function PullRequestPanel({
           <>
             <span className={`size-1.5 rounded-full ${prTone(pr).dot}`} />
             <a
-              href={pr.url ?? undefined}
+              href={safeHttpUrl(pr.url)}
               target="_blank"
               rel="noreferrer"
               className="font-medium text-accent-fg hover:underline"
