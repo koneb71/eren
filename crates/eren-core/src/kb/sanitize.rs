@@ -129,14 +129,12 @@ pub fn article_html(html: &str) -> String {
 /// `language-rust`, `language-c++`, `language-objective-c`: one class, with
 /// nothing in it the stylesheet could be made to act on.
 fn is_language_class(value: &str) -> bool {
-    value
-        .strip_prefix("language-")
-        .is_some_and(|lang| {
-            (1..=40).contains(&lang.len())
-                && lang
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '#' | '.' | '-'))
-        })
+    value.strip_prefix("language-").is_some_and(|lang| {
+        (1..=40).contains(&lang.len())
+            && lang
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '#' | '.' | '-'))
+    })
 }
 
 /// Drop any `<iframe>` whose `src` isn't on the embed allowlist.

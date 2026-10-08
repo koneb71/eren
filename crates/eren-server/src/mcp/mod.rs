@@ -279,7 +279,12 @@ mod tests {
         for local in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"] {
             assert!(from_this_machine(Some(local.parse().unwrap())), "{local}");
         }
-        for away in ["192.168.1.9", "172.17.0.1", "10.0.0.2", "::ffff:192.168.1.9"] {
+        for away in [
+            "192.168.1.9",
+            "172.17.0.1",
+            "10.0.0.2",
+            "::ffff:192.168.1.9",
+        ] {
             assert!(!from_this_machine(Some(away.parse().unwrap())), "{away}");
         }
         // No peer at all fails closed.

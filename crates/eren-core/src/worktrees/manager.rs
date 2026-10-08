@@ -1395,9 +1395,12 @@ mod tests {
             std::fs::write(&path, body).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        git(repo.path(), &["commit", "--allow-empty", "-m", "mechanical"])
-            .await
-            .expect("a failing pre-commit hook does not stop Eren's commit");
+        git(
+            repo.path(),
+            &["commit", "--allow-empty", "-m", "mechanical"],
+        )
+        .await
+        .expect("a failing pre-commit hook does not stop Eren's commit");
         assert!(!marker.exists(), "the post-commit hook ran");
     }
 

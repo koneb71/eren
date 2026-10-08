@@ -732,7 +732,11 @@ mod tests {
             Duration::from_secs(10),
         )
         .await;
-        assert!(r.output_tail.contains("key=;plain=kept;"), "{}", r.output_tail);
+        assert!(
+            r.output_tail.contains("key=;plain=kept;"),
+            "{}",
+            r.output_tail
+        );
     }
 
     #[test]

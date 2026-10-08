@@ -448,7 +448,10 @@ mod tests {
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("default-src 'none'; sandbox"),
         );
-        h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        h.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
         harden(&mut h);
         let policies: Vec<&str> = h
             .get_all(header::CONTENT_SECURITY_POLICY)
@@ -466,7 +469,13 @@ mod tests {
         let mut plain = axum::http::HeaderMap::new();
         harden(&mut plain);
         assert_eq!(plain.get(header::REFERRER_POLICY).unwrap(), "same-origin");
-        assert_eq!(plain.get_all(header::CONTENT_SECURITY_POLICY).iter().count(), 1);
+        assert_eq!(
+            plain
+                .get_all(header::CONTENT_SECURITY_POLICY)
+                .iter()
+                .count(),
+            1
+        );
     }
 
     /// `EREN_TRUST_NETWORK=false` is somebody saying no, not yes.

@@ -257,8 +257,7 @@ mod tests {
         // spaces unless the machine is very unusual.
         let dir = tempfile::tempdir().unwrap();
         let outside = dir.path().to_string_lossy().into_owned();
-        if super::super::fs::opens_under(&super::super::fs::managed_roots(), dir.path()).is_some()
-        {
+        if super::super::fs::opens_under(&super::super::fs::managed_roots(), dir.path()).is_some() {
             // $HOME is /tmp here; nothing to prove on this machine.
             return;
         }

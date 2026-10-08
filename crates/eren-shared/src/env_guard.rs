@@ -373,8 +373,14 @@ mod own_secret_tests {
         let mut cmd = command("true");
         strip_auth_env(
             &mut cmd,
-            ["OPENAI_API_KEY", "ACME_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "PATH", "NODE_ENV"]
-                .map(String::from),
+            [
+                "OPENAI_API_KEY",
+                "ACME_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "PATH",
+                "NODE_ENV",
+            ]
+            .map(String::from),
         );
         let removed: Vec<String> = cmd
             .as_std()

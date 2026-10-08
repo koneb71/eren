@@ -54,7 +54,15 @@ mod tests {
 
     #[test]
     fn unset_zero_or_nonsense_means_keep_forever() {
-        for raw in [None, Some(""), Some(" "), Some("0"), Some("abc"), Some("-3"), Some("1.5")] {
+        for raw in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("0"),
+            Some("abc"),
+            Some("-3"),
+            Some("1.5"),
+        ] {
             assert_eq!(parse_days(raw), None, "{raw:?}");
         }
         assert_eq!(parse_days(Some("30")), Some(30));

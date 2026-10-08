@@ -414,7 +414,10 @@ const SERVICE_KEYS: &[&str] = &[
 
 /// Service keys that reach outside the preview, each with what it reaches.
 const SERVICE_REFUSED: &[(&str, &str)] = &[
-    ("privileged", "runs the container with the host's own privileges"),
+    (
+        "privileged",
+        "runs the container with the host's own privileges",
+    ),
     ("cap_add", "adds kernel capabilities"),
     ("devices", "hands it the host's devices"),
     ("device_cgroup_rules", "hands it the host's devices"),
@@ -423,7 +426,10 @@ const SERVICE_REFUSED: &[(&str, &str)] = &[
     ("uts", "shares the host's UTS namespace"),
     ("cgroup", "shares the host's cgroup namespace"),
     ("cgroup_parent", "places it in a cgroup of its choosing"),
-    ("network_mode", "joins another network namespace, the host's included"),
+    (
+        "network_mode",
+        "joins another network namespace, the host's included",
+    ),
     ("userns_mode", "changes the user namespace"),
     ("security_opt", "changes the security profile Eren sets"),
     ("sysctls", "changes kernel parameters"),
@@ -460,10 +466,16 @@ const BUILD_KEYS: &[&str] = &[
 
 /// `build:` keys that reach outside the stack's own folder or the build sandbox.
 const BUILD_REFUSED: &[(&str, &str)] = &[
-    ("additional_contexts", "reads paths outside the stack's folder"),
+    (
+        "additional_contexts",
+        "reads paths outside the stack's folder",
+    ),
     ("ssh", "hands the build an SSH agent or key"),
     ("secrets", "reads files on the host"),
-    ("privileged", "runs build steps with the host's own privileges"),
+    (
+        "privileged",
+        "runs build steps with the host's own privileges",
+    ),
     ("network", "joins another network namespace at build time"),
     ("extra_hosts", "changes the build's host resolution"),
     ("isolation", "chooses the isolation technology"),
@@ -492,9 +504,7 @@ fn stays_inside(path: &str) -> bool {
 
 /// A short-form volume source that names a volume rather than a path.
 fn is_named_volume(source: &str) -> bool {
-    !source.is_empty()
-        && !source.contains(['/', '\\'])
-        && !source.starts_with(['.', '~', '$'])
+    !source.is_empty() && !source.contains(['/', '\\']) && !source.starts_with(['.', '~', '$'])
 }
 
 /// The names of a mapping, for walking its keys.
@@ -566,7 +576,10 @@ fn vet(doc: &Value) -> Result<(), ComposeError> {
                     _ => None,
                 };
                 if !path.is_some_and(stays_inside) {
-                    return Err(refused("env_file", "reads a file outside the stack's folder"));
+                    return Err(refused(
+                        "env_file",
+                        "reads a file outside the stack's folder",
+                    ));
                 }
             }
         }
@@ -632,7 +645,11 @@ fn vet_volume(service: &str, entry: &Value) -> Result<(), ComposeError> {
             // `C:\\code:/app` — a Windows drive, which the colon split below
             // would otherwise read as a volume called `C`.
             let b = short.as_bytes();
-            if b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/') {
+            if b.len() > 2
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'\\' | b'/')
+            {
                 return Err(refused(HOST_PATH));
             }
             let mut parts = short.splitn(3, ':');
@@ -1025,7 +1042,9 @@ services:
         for (key, _) in SERVICE_REFUSED {
             let text = format!("services:\n  api:\n    image: x\n    {key}: true\n");
             match plan(&text) {
-                Err(ComposeError::Refused { service, key: k, .. }) => {
+                Err(ComposeError::Refused {
+                    service, key: k, ..
+                }) => {
                     assert_eq!(service.as_deref(), Some("api"), "{key}");
                     assert_eq!(k, *key);
                 }
@@ -1035,13 +1054,18 @@ services:
         for (key, _) in TOP_LEVEL_REFUSED {
             let text = format!("services: {{web: {{image: x}}}}\n{key}: {{}}\n");
             assert!(
-                matches!(plan(&text), Err(ComposeError::Refused { service: None, .. })),
+                matches!(
+                    plan(&text),
+                    Err(ComposeError::Refused { service: None, .. })
+                ),
                 "{key}"
             );
         }
         // The message names the place and the key, which is what the person
         // about to click Preview needs.
-        let m = plan("services: {api: {privileged: true}}").unwrap_err().message();
+        let m = plan("services: {api: {privileged: true}}")
+            .unwrap_err()
+            .message();
         assert!(m.contains("`privileged`") && m.contains("`api`"), "{m}");
     }
 
@@ -1085,7 +1109,12 @@ services:
         let long = "services:\n  web:\n    image: x\n    volumes:\n      - type: bind\n        source: /etc\n        target: /x\n";
         assert!(matches!(plan(long), Err(ComposeError::Refused { .. })));
 
-        for ok in ["./src:/app", "src:/app:ro", "data:/data", "/just/a/container/path"] {
+        for ok in [
+            "./src:/app",
+            "src:/app:ro",
+            "data:/data",
+            "/just/a/container/path",
+        ] {
             let text = format!("services:\n  web:\n    image: x\n    volumes: ['{ok}']\n");
             assert!(plan(&text).is_ok(), "{ok}");
         }
@@ -1095,11 +1124,23 @@ services:
 
     #[test]
     fn a_remote_or_climbing_build_context_is_refused() {
-        for ctx in ["../other", "/srv/code", "https://github.com/x/y.git", "git@github.com:x/y.git", "~/code"] {
+        for ctx in [
+            "../other",
+            "/srv/code",
+            "https://github.com/x/y.git",
+            "git@github.com:x/y.git",
+            "~/code",
+        ] {
             let short = format!("services: {{web: {{build: '{ctx}'}}}}");
-            assert!(matches!(plan(&short), Err(ComposeError::Refused { .. })), "{ctx}");
+            assert!(
+                matches!(plan(&short), Err(ComposeError::Refused { .. })),
+                "{ctx}"
+            );
             let long = format!("services: {{web: {{build: {{context: '{ctx}'}}}}}}");
-            assert!(matches!(plan(&long), Err(ComposeError::Refused { .. })), "{ctx}");
+            assert!(
+                matches!(plan(&long), Err(ComposeError::Refused { .. })),
+                "{ctx}"
+            );
         }
         assert!(matches!(
             plan("services: {web: {build: {context: ., dockerfile: ../Dockerfile}}}"),
@@ -1140,7 +1181,11 @@ services:
         assert_eq!(services.len(), 2);
         for (_, spec) in services {
             let opts = spec.get("security_opt").unwrap().as_sequence().unwrap();
-            assert_eq!(opts, &[Value::String("no-new-privileges:true".into())], "{out}");
+            assert_eq!(
+                opts,
+                &[Value::String("no-new-privileges:true".into())],
+                "{out}"
+            );
             assert_eq!(
                 spec.get("mem_limit").and_then(Value::as_str),
                 Some(super::super::docker::PREVIEW_MEMORY)

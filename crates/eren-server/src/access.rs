@@ -430,8 +430,11 @@ mod tests {
         assert!(generated.len() >= 60);
         assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), generated);
 
-        let given = token_for(TokenSetting::Given(TOKEN.into()), &dir.path().join("unused"))
-            .unwrap();
+        let given = token_for(
+            TokenSetting::Given(TOKEN.into()),
+            &dir.path().join("unused"),
+        )
+        .unwrap();
         assert_eq!(given.as_deref(), Some(TOKEN));
         assert!(!dir.path().join("unused").exists());
 

@@ -466,7 +466,13 @@ mod tests {
     /// else — not the API, and not the sockets behind it.
     #[test]
     fn a_temporary_password_opens_nothing_but_the_way_to_change_it() {
-        for gated in ["/api/tasks", "/api", "/ws", "/ws/terminal/x", "/ws/terminal"] {
+        for gated in [
+            "/api/tasks",
+            "/api",
+            "/ws",
+            "/ws/terminal/x",
+            "/ws/terminal",
+        ] {
             assert!(gated_while_changing_password(gated), "{gated}");
         }
         for open in [

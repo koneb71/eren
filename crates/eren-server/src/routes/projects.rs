@@ -774,7 +774,6 @@ async fn create_space(
     Ok(Json(project_json(&row)))
 }
 
-
 #[derive(Deserialize)]
 struct CreateProject {
     workspace_id: Uuid,
@@ -1036,6 +1035,9 @@ mod tests {
         let insert = body
             .find("INSERT INTO projects")
             .expect("create inserts the project");
-        assert!(sandbox < insert, "the sandbox check comes before the insert");
+        assert!(
+            sandbox < insert,
+            "the sandbox check comes before the insert"
+        );
     }
 }
