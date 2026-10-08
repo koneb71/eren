@@ -397,6 +397,8 @@ mod db_tests {
         .fetch_one(&db.pool)
         .await
         .unwrap();
+        // Closed until the admin opens it.
+        crate::users::set_signup_open(db, true).await.unwrap();
         let bea = crate::users::sign_up(db, "bea", "another password")
             .await
             .unwrap();

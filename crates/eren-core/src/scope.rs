@@ -356,6 +356,8 @@ mod db_tests {
         let admin = crate::users::create_admin(db, "admin", "a long password")
             .await
             .unwrap();
+        // Closed until the admin opens it.
+        crate::users::set_signup_open(db, true).await.unwrap();
         let bea = crate::users::sign_up(db, "bea", "another password")
             .await
             .unwrap();
