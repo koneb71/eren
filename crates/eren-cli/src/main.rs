@@ -565,7 +565,9 @@ async fn admin(cmd: AdminCmd) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!(
                 "✓ {} is the admin. Accounts are on: every browser now signs in, and \
-                 the workspaces made so far belong to {}.",
+                 the workspaces made so far belong to {}.\n  Sign-up is closed: open it \
+                 under Users in the dashboard if other people should make their own \
+                 accounts, and close it again once they have.",
                 user.username, user.username
             );
         }

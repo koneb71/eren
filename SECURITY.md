@@ -126,9 +126,17 @@ you are publishing an unauthenticated agent runner.
 `docker-compose.previews.yml` is the one Docker setting that widens what an agent can do, and
 it is opt-in for that reason: it mounts the host's Docker socket into Eren's container so
 previews and container apps work there, and whatever can use that socket is root on the host.
-Eren only builds and runs previews with it (each still without socket, mounts or privileges,
-published on loopback or, on Linux, the bridge gateway — never every interface), but agents in
-the container have a shell, so with it any agent run can reach the host. Without it, an agent
+Eren only builds and runs previews with it — each still without socket, host mounts or
+privileges, published on loopback or, on Linux, the bridge gateway, never every interface.
+That holds for a compose stack as much as for a single container: a stack is agent-written
+code, so `previews::compose::vet` checks it against a closed allow-list before it is written,
+and `privileged`, `cap_add`, `devices`, `pid`/`ipc`/`network_mode`, `security_opt`,
+`extends`, `secrets`, a bind mount of an absolute, `~` or `..` path, an external volume or
+network, a build context outside the stack's folder, and any key it does not recognise are
+refused with the service and key named — not stripped, so the person clicking Preview knows
+what the branch asked for — and every service gets the same memory, CPU, pid and
+no-new-privileges caps as a single container. But agents in the container have a shell, so
+with the socket any agent run can reach the host. Without it, an agent
 is confined to the container and the mounted projects folder.
 
 The databases deserve that sentence. The compose Postgres defaults to a well-known password
@@ -171,7 +179,9 @@ a loopback peer — the agent CLIs, identified by the live run in their URL as b
   body — lives in a workspace that caller owns (`eren_core::scope`), answering 404 rather
   than 403 so ids cannot be probed. Machine-wide settings, the queue, machine-scope budgets and
   the audit log are the admin's alone.
-- Sign-up is open to anyone who can reach the dashboard until the admin closes it.
+- Sign-up is closed until the admin opens it under Users; while it is open, anyone who can
+  reach the dashboard may create an account. Closed by default because accounts are turned on
+  exactly where the bind is wide, and there the token no longer stands in front of the port.
 
 **What accounts do not isolate.** Every account's agents and terminals run as the same OS user
 in the same filesystem, with the same database credentials in reach. An account that can run

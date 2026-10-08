@@ -1086,6 +1086,15 @@ and a preview nobody has looked at for 30 minutes stops itself, keeping its imag
 back costs seconds. At boot, Eren reconciles against *Docker* rather than its own table,
 so a container no row claims is swept rather than orphaned.
 
+A compose file is a branch's own code, and compose is a fluent way to ask for the host. So
+a stack is vetted against a closed allow-list before it runs: host ports are stripped and
+one is republished, `container_name` is stripped, and `privileged`, added capabilities,
+devices, host or shared namespaces (`pid`, `ipc`, `network_mode`), `security_opt`,
+`extends`, `secrets`, a bind mount of an absolute, `~` or `..` path, an external volume or
+network, a build context outside the stack's folder, and any key Eren does not recognise are
+**refused** with the service and key named, rather than quietly stripped. Every service then
+gets the same memory, CPU, pid and no-new-privileges caps a single container does.
+
 A project with neither a Dockerfile nor a compose file can ask an agent to write a
 **recipe**. A Dockerfile is not configuration — `RUN` executes arbitrary commands on this
 machine — so a written recipe is a proposal in [the inbox](#the-inbox), shown in full and
@@ -1306,9 +1315,9 @@ It asks for a password twice (`--password-stdin` reads one line instead) and mak
 
 - **Every browser signs in**, this machine's included, and the access token is no longer
   consulted. The agent CLIs Eren starts still reach `/mcp` over loopback without one.
-- **Anyone who can reach the dashboard can create an account**, and starts with a workspace of
-  their own. The admin closes sign-up under **Users** once everyone who should have an account
-  has one.
+- **Sign-up is closed until the admin opens it** under **Users**. While it is open, anyone who
+  can reach the dashboard can create an account, and starts with a workspace of their own; close
+  it again once everyone who should have an account has one.
 - **Each account sees only its own workspaces** and everything in them: projects, cards, runs,
   agents, chats, the knowledge base, budgets, the inbox. Everything made before accounts were
   turned on belongs to the admin.
@@ -1531,8 +1540,9 @@ plain `docker compose` command, and `docker-deploy.sh`, includes it.
 
 **This is root on the host, for every agent.** Whatever can use Docker's socket can start a
 privileged container with `/` mounted. Eren itself only builds and runs previews with it —
-and those still get no socket, no mount and no privileges — but the agents in this container
-have a shell, so with the socket any agent run can do the same. Without it they are confined
+and those still get no socket, no host mount and no privileges, because a stack that asks for
+any of them is refused before it is written (see [Previews](#previews)) — but the agents in
+this container have a shell, so with the socket any agent run can do the same. Without it they are confined
 to the container and the folder you mounted. That is why this is a separate file and not part
 of `docker-compose.yml`. If that trade is wrong for you, run Eren on the host instead (the
 recommended shape, above), where previews need nothing extra.

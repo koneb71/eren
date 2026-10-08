@@ -123,16 +123,40 @@ async fn login(
     }
 }
 
+/// The name the sign-up throttle counts under. Sign-ups are throttled per
+/// address rather than per username, because the refusal a guesser is after
+/// ("that username is taken") comes from trying many names from one place.
+const SIGNUP_THROTTLE_KEY: &str = "\0signup";
+
 async fn signup(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ext: Extensions,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
     require_write(&headers, "signing up makes an account")?;
-    let user = users::sign_up(&state.db, &body.username, &body.password)
-        .await
-        .map_err(refused)?;
-    signed_in(&state, user).await
+    let ip = peer(&ext);
+    let throttle = state.accounts.throttle();
+    if let Some(wait) = throttle.wait(SIGNUP_THROTTLE_KEY, ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "too many sign-up attempts; try again in {} seconds",
+                wait.as_secs().max(1)
+            ),
+        ));
+    }
+    match users::sign_up(&state.db, &body.username, &body.password).await {
+        Ok(user) => {
+            throttle.succeeded(SIGNUP_THROTTLE_KEY, ip);
+            signed_in(&state, user).await
+        }
+        Err(e) => {
+            // Every refusal counts — a taken name is the one a guesser wants.
+            throttle.failed(SIGNUP_THROTTLE_KEY, ip);
+            Err(refused(e))
+        }
+    }
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {

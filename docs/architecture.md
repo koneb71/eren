@@ -760,8 +760,8 @@ then on:
   budgets, the audit log, the account list. With accounts off everybody is the admin.
 - **`/ws`** requires a `run_id` it can check; the firehose of every run's events is gone.
 
-Sign-up (`users::sign_up`) is open until the admin closes it (`settings` key `signup`), and makes
-a workspace for the new account. The admin's reset sets a temporary password with
+Sign-up (`users::sign_up`) is closed until the admin opens it (`settings` key `signup`, absent
+means closed), and makes a workspace for the new account. The admin's reset sets a temporary password with
 `must_change_password` and deletes the account's sessions. Agents, routines and the queue do not
 know about accounts: they act within the workspace of what they run for, and the people who
 can see that workspace are the ones who own it. What accounts do not separate — one OS user,
@@ -1026,7 +1026,13 @@ locally — Eren never calls a model API.
 a diff, and reading a diff is a poor way to answer "does this look right". One container
 per card (enforced by a partial unique index) on one loopback port, with hard memory/CPU/pid
 caps; previews nobody is looking at stop themselves (`idle_loop`), keeping their image so
-coming back costs seconds. A Dockerfile or compose recipe an agent wrote is kept in
+coming back costs seconds. A compose stack (`previews/compose.rs`) is agent-written code, so
+`vet` checks it against a closed allow-list of keys before it is rendered — anything that
+reaches the host (`privileged`, capabilities, devices, shared namespaces, `security_opt`,
+`extends`, host-path mounts, external volumes and networks, build contexts outside the
+stack's folder) or that the list does not know is refused with the service and key named,
+host ports and `container_name` are stripped, and `render` writes the single-container caps
+onto every service. A Dockerfile or compose recipe an agent wrote is kept in
 `preview_recipes`, never written into the branch, and waits in the inbox (`Recipe`) for a
 person to read before it is built. `previews::reconcile` at boot reads Docker rather than the
 table, so a container no row claims is swept rather than orphaned — under either of the

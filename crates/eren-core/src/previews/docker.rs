@@ -233,6 +233,13 @@ pub async fn build(
     Err(tail(&String::from_utf8_lossy(&out.stderr), 20))
 }
 
+/// The limits every preview container runs under — here for a single
+/// container, and written into every service of a stack by
+/// `compose::Plan::render`, from the same three numbers.
+pub(crate) const PREVIEW_MEMORY: &str = "2g";
+pub(crate) const PREVIEW_CPUS: u64 = 2;
+pub(crate) const PREVIEW_PIDS: u64 = 512;
+
 /// Start a container from a built image, published on one loopback port.
 ///
 /// The flags here are the slice's security surface, and each one is load
@@ -268,7 +275,9 @@ pub async fn run(
         .args(["--name", name])
         .args(["--label", &format!("{OWNER_LABEL}=1")])
         .args(["-p", &format!("{}:{container_port}", published(host_port))])
-        .args(["--memory", "2g", "--cpus", "2", "--pids-limit", "512"])
+        .args(["--memory", PREVIEW_MEMORY])
+        .args(["--cpus", &PREVIEW_CPUS.to_string()])
+        .args(["--pids-limit", &PREVIEW_PIDS.to_string()])
         .args(["--security-opt", "no-new-privileges"])
         // Docker restarts containers on daemon boot otherwise; a preview
         // should not outlive the reason it was started.

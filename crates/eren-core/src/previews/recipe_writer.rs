@@ -144,7 +144,11 @@ pub fn prompt(survey: &Survey) -> String {
          no .env file, and no secrets at run time — anything needed must have a \
          working default.\n\
          - Do not fetch from a private registry.\n\
-         - In compose, give any database a throwaway password and no host port.\n\n",
+         - In compose, give any database a throwaway password and no host port.\n\
+         - In compose, never ask for the host: no `privileged`, `cap_add`, `devices`, \
+         `pid`, `network_mode`, `security_opt`, `extends`, `container_name`, no bind \
+         mount of an absolute or `..` path, no external volume or network. Eren \
+         refuses a stack that asks for any of them.\n\n",
     );
     out.push_str("Files at the project root:\n");
     for e in &survey.entries {
@@ -174,7 +178,10 @@ pub fn extract(reply: &str) -> Option<(Kind, String)> {
     let looks_dockerfile = body
         .lines()
         .any(|l| l.trim_start().to_ascii_uppercase().starts_with("FROM "));
-    let looks_compose = super::compose::plan(&body).is_ok();
+    // Recognised as a stack whether or not it will be allowed to run: a stack
+    // that asks for the host is refused by name when it is built, which is a
+    // better answer than "this is neither".
+    let looks_compose = super::compose::looks_like_stack(&body);
 
     match (looks_compose, looks_dockerfile) {
         // A Dockerfile is not valid YAML with a `services:` key, so these are
@@ -224,6 +231,17 @@ mod tests {
         // compose even when the agent tags the fence `yaml`.
         let (kind, _) = extract("```yaml\nservices:\n  web:\n    image: nginx\n```").unwrap();
         assert_eq!(kind, Kind::Compose);
+    }
+
+    #[test]
+    fn a_stack_that_will_be_refused_is_still_a_stack() {
+        // Classified as compose, so the refusal names the key at build time
+        // instead of this reading as "neither a Dockerfile nor a stack".
+        let (kind, body) =
+            extract("```compose\nservices:\n  web:\n    image: nginx\n    privileged: true\n```")
+                .unwrap();
+        assert_eq!(kind, Kind::Compose);
+        assert!(super::super::compose::plan(&body).is_err());
     }
 
     #[test]

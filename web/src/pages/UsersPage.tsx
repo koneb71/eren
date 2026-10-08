@@ -101,7 +101,7 @@ export default function UsersPage() {
         <div className="min-w-0">
           <div className="text-[13px] font-medium text-fg">Allow sign-up</div>
           <p className="mt-0.5 text-xs leading-relaxed text-fg-muted">
-            Anyone who can reach this address can create an account. Close it once everyone who should have one does.
+            Off until you open it. While open, anyone who can reach this address can create an account; close it again once everyone who should have one does.
           </p>
         </div>
         {signupOpen !== null && <Switch checked={signupOpen} onChange={(v) => void toggleSignup(v)} label="Allow sign-up" />}

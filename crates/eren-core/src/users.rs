@@ -7,8 +7,11 @@
 //! "one": a partial unique index), adopts every workspace that has no owner,
 //! and from then on every request needs a session ([`crate::sessions`]).
 //!
-//! Anyone who can reach the server may sign up while the admin leaves sign-up
-//! open; each new account starts with a workspace of its own. The admin can
+//! Sign-up is closed until the admin opens it on the Users page; while it is
+//! open, anyone who can reach the server may make an account, and each new
+//! account starts with a workspace of its own. Closed by default because a
+//! wide bind is exactly where accounts get turned on, and an open door there
+//! is an account for whoever finds the port. The admin can
 //! reset a password (a temporary one, which works only to choose a new one)
 //! and disable an account. Neither ever shows the admin a password but the
 //! temporary one they set.
@@ -233,8 +236,9 @@ pub async fn create_admin(db: &Db, username: &str, password: &str) -> Result<Use
     Ok(user)
 }
 
-/// Somebody signing themselves up. Refused while sign-up is closed, and
-/// while accounts are off — there is no admin yet to have opened it.
+/// Somebody signing themselves up. Refused while sign-up is closed (which it
+/// is until the admin opens it), and while accounts are off — there is no
+/// admin yet to have opened it.
 pub async fn sign_up(db: &Db, username: &str, password: &str) -> Result<User, Refusal> {
     let name = normalize_username(username)?;
     check_password(password)?;
@@ -410,8 +414,8 @@ pub async fn set_disabled(db: &Db, id: Uuid, disabled: bool) -> Result<(), Refus
 
 const SIGNUP_KEY: &str = "signup";
 
-/// Whether anyone who can reach the server may make an account. Open unless
-/// the admin closed it.
+/// Whether anyone who can reach the server may make an account. Closed unless
+/// the admin opened it (`PUT /api/auth/signup-open`, the switch under Users).
 pub async fn signup_open(db: &Db) -> anyhow::Result<bool> {
     let v: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
@@ -419,7 +423,7 @@ pub async fn signup_open(db: &Db) -> anyhow::Result<bool> {
             .fetch_optional(&db.pool)
             .await?;
     Ok(v.and_then(|v| v.get("open").and_then(|o| o.as_bool()))
-        .unwrap_or(true))
+        .unwrap_or(false))
 }
 
 pub async fn set_signup_open(db: &Db, open: bool) -> anyhow::Result<()> {
@@ -511,22 +515,31 @@ mod db_tests {
         t.finish().await;
     }
 
+    /// Sign-up is closed until the admin opens it: turning accounts on must
+    /// never, by itself, let whoever can reach the port make an account.
     #[tokio::test]
-    async fn a_new_account_gets_a_workspace_of_its_own() {
+    async fn sign_up_is_closed_until_the_admin_opens_it() {
         let Some(t) = testdb::fresh().await else {
             return;
         };
         let db = &t.db;
         let admin = create_admin(db, "admin", "a long password").await.unwrap();
+        assert!(!signup_open(db).await.unwrap());
+        assert!(matches!(
+            sign_up(db, "bea", "another password").await,
+            Err(Refusal::SignupClosed)
+        ));
+
+        set_signup_open(db, true).await.unwrap();
         let user = sign_up(db, "Bea", "another password").await.unwrap();
         let mine = workspaces(db, user.id).await.unwrap();
         assert_eq!(mine.len(), 1);
         assert!(!workspaces(db, admin.id).await.unwrap().contains(&mine[0]));
-
         assert!(matches!(
             sign_up(db, "bea", "another password").await,
             Err(Refusal::Taken)
         ));
+
         set_signup_open(db, false).await.unwrap();
         assert!(matches!(
             sign_up(db, "cal", "another password").await,
@@ -542,6 +555,7 @@ mod db_tests {
         };
         let db = &t.db;
         create_admin(db, "admin", "a long password").await.unwrap();
+        set_signup_open(db, true).await.unwrap();
         let bea = sign_up(db, "bea", "another password").await.unwrap();
 
         assert!(matches!(
@@ -572,6 +586,7 @@ mod db_tests {
         };
         let db = &t.db;
         let admin = create_admin(db, "admin", "a long password").await.unwrap();
+        set_signup_open(db, true).await.unwrap();
         let bea = sign_up(db, "bea", "another password").await.unwrap();
         let token = crate::sessions::create(db, bea.id).await.unwrap();
 

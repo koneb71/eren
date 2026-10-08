@@ -18,7 +18,25 @@
 //! container names with its project name, so running under
 //! `eren-preview-<id>` means a preview's `app` network and `backend-data`
 //! volume are its own — it cannot join, reuse, or later delete the ones the
-//! user's real stack is using.
+//! user's real stack is using. (`container_name` would defeat that, so it is
+//! stripped like a port.)
+//!
+//! **The file is vetted against a closed allow-list before it is written.** A
+//! compose file is agent-written code — a card's branch, or a recipe an agent
+//! proposed — and compose is a very expressive way to ask for the host:
+//! `privileged: true`, a bind mount of `/` or of the Docker socket,
+//! `pid: host`, `network_mode: host`, added capabilities, devices, an
+//! `extends` of a file outside the branch, a named volume whose
+//! `driver_opts` bind a host path. Stripping `ports` alone left every one of
+//! those in. So [`vet`] walks the document with a closed list of the keys a
+//! preview may use, refuses — naming the service and the key — anything that
+//! reaches outside the preview, and refuses anything it does not recognise
+//! rather than letting it through: a new compose feature is a decision here,
+//! not a surprise. Refused, not stripped, because the person about to click
+//! Preview should know their branch asked for it. Paths (build contexts,
+//! `env_file`, bind-mount sources) must stay inside the stack's own folder.
+//! Then [`Plan::render`] gives every service the same memory, CPU, pid and
+//! no-new-privileges limits a single-container preview gets.
 //!
 //! Pure and tested: the rewriting is where a mistake would be expensive, and it
 //! is decided entirely from the file's text.
@@ -65,6 +83,7 @@ impl Plan {
     pub fn render(&self, preview_id: &uuid::Uuid, publish: std::net::SocketAddr) -> String {
         let mut doc = self.doc.clone();
         namespace_built_images(&mut doc, preview_id);
+        harden_every_service(&mut doc);
         if let Some(spec) = doc
             .get_mut("services")
             .and_then(Value::as_mapping_mut)
@@ -85,6 +104,36 @@ impl Plan {
     /// The stripped file, for tests and for showing what will run.
     pub fn stripped(&self) -> String {
         serde_yaml::to_string(&self.doc).unwrap_or_default()
+    }
+}
+
+/// The limits a single-container preview gets (`docker::run`), on every
+/// service of a stack. `vet` has already refused a file's own `security_opt`,
+/// so the one written here is the only one.
+fn harden_every_service(doc: &mut Value) {
+    let Some(services) = doc.get_mut("services").and_then(Value::as_mapping_mut) else {
+        return;
+    };
+    for (_, spec) in services.iter_mut() {
+        let Some(map) = spec.as_mapping_mut() else {
+            continue;
+        };
+        map.insert(
+            Value::String("security_opt".into()),
+            Value::Sequence(vec![Value::String("no-new-privileges:true".into())]),
+        );
+        map.insert(
+            Value::String("mem_limit".into()),
+            Value::String(super::docker::PREVIEW_MEMORY.into()),
+        );
+        map.insert(
+            Value::String("cpus".into()),
+            Value::Number(super::docker::PREVIEW_CPUS.into()),
+        );
+        map.insert(
+            Value::String("pids_limit".into()),
+            Value::Number(super::docker::PREVIEW_PIDS.into()),
+        );
     }
 }
 
@@ -188,15 +237,43 @@ fn slug(name: &str) -> String {
 pub enum ComposeError {
     Unparseable(String),
     NoServices,
+    /// A key that reaches outside the preview — the host's filesystem,
+    /// namespaces, privileges — on a service (or, with `service: None`, at
+    /// the top level). `why` says what it would reach.
+    Refused {
+        service: Option<String>,
+        key: String,
+        why: &'static str,
+    },
+    /// A key the allow-list does not know. Refused rather than passed
+    /// through, because compose keeps growing ways to ask for the host.
+    Unsupported {
+        service: Option<String>,
+        key: String,
+    },
 }
 
 impl ComposeError {
     pub fn message(&self) -> String {
+        let place = |service: &Option<String>| match service {
+            Some(s) => format!("on service `{s}`"),
+            None => "at the top level".to_string(),
+        };
         match self {
             Self::Unparseable(why) => {
                 format!("This project's compose file could not be read: {why}")
             }
             Self::NoServices => "This project's compose file defines no services.".to_string(),
+            Self::Refused { service, key, why } => format!(
+                "This project's compose file asks for `{key}` {}, which {why}. Eren will not \
+                 run it: remove it from the branch, or preview a Dockerfile instead.",
+                place(service)
+            ),
+            Self::Unsupported { service, key } => format!(
+                "This project's compose file uses `{key}` {}, which Eren's previews do not \
+                 support. Remove it from the branch, or preview a Dockerfile instead.",
+                place(service)
+            ),
         }
     }
 }
@@ -213,6 +290,14 @@ pub fn plan(text: &str) -> Result<Plan, ComposeError> {
     if services.is_empty() {
         return Err(ComposeError::NoServices);
     }
+
+    // Before anything is rewritten: a file that asks for the host is refused
+    // whole, with the service and key named, never partly run.
+    vet(&doc)?;
+    let services = doc
+        .get_mut("services")
+        .and_then(Value::as_mapping_mut)
+        .ok_or(ComposeError::NoServices)?;
 
     let names: Vec<String> = services
         .keys()
@@ -245,10 +330,13 @@ pub fn plan(text: &str) -> Result<Plan, ComposeError> {
 
     // Strip host bindings everywhere. Not just from the published service:
     // a database that declares "5432:5432" would collide with the user's own
-    // Postgres just as surely as a frontend would.
+    // Postgres just as surely as a frontend would. `container_name` goes the
+    // same way: it is used verbatim, outside the project namespace, so it
+    // would collide with — or be — the user's real container.
     for (_, spec) in services.iter_mut() {
         if let Some(map) = spec.as_mapping_mut() {
             map.remove(Value::String("ports".into()));
+            map.remove(Value::String("container_name".into()));
         }
     }
 
@@ -259,6 +347,391 @@ pub fn plan(text: &str) -> Result<Plan, ComposeError> {
         services: names,
         doc,
     })
+}
+
+/// Whether `text` is a compose file at all — parses, and declares at least
+/// one service — whatever [`vet`] will say about it. For telling a stack from
+/// a Dockerfile; a refused stack is still a stack, and is refused by name
+/// when it is built rather than mistaken for prose.
+pub fn looks_like_stack(text: &str) -> bool {
+    serde_yaml::from_str::<Value>(text)
+        .ok()
+        .and_then(|doc| doc.get("services")?.as_mapping().map(|m| !m.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Top-level keys a stack may use. `x-*` extension fields are allowed too.
+const TOP_LEVEL_KEYS: &[&str] = &["version", "name", "services", "volumes", "networks"];
+
+/// Top-level keys that read files outside the stack.
+const TOP_LEVEL_REFUSED: &[(&str, &str)] = &[
+    ("include", "pulls in compose files from outside this one"),
+    ("secrets", "reads files on the host"),
+    ("configs", "reads files on the host"),
+];
+
+/// Service keys a preview may use. Closed: a key not here is refused by name.
+const SERVICE_KEYS: &[&str] = &[
+    "image",
+    "build",
+    "command",
+    "entrypoint",
+    "environment",
+    "env_file",
+    "expose",
+    "ports",
+    "container_name",
+    "depends_on",
+    "healthcheck",
+    "working_dir",
+    "user",
+    "restart",
+    "volumes",
+    "networks",
+    "labels",
+    "stop_grace_period",
+    "stop_signal",
+    "init",
+    "read_only",
+    "tmpfs",
+    "shm_size",
+    "platform",
+    "profiles",
+    "deploy",
+    "logging",
+    "extra_hosts",
+    "dns",
+    "dns_search",
+    "hostname",
+    "domainname",
+    "stdin_open",
+    "tty",
+    "cap_drop",
+    "pull_policy",
+    "links",
+    "scale",
+];
+
+/// Service keys that reach outside the preview, each with what it reaches.
+const SERVICE_REFUSED: &[(&str, &str)] = &[
+    ("privileged", "runs the container with the host's own privileges"),
+    ("cap_add", "adds kernel capabilities"),
+    ("devices", "hands it the host's devices"),
+    ("device_cgroup_rules", "hands it the host's devices"),
+    ("pid", "shares a process namespace, the host's included"),
+    ("ipc", "shares an IPC namespace, the host's included"),
+    ("uts", "shares the host's UTS namespace"),
+    ("cgroup", "shares the host's cgroup namespace"),
+    ("cgroup_parent", "places it in a cgroup of its choosing"),
+    ("network_mode", "joins another network namespace, the host's included"),
+    ("userns_mode", "changes the user namespace"),
+    ("security_opt", "changes the security profile Eren sets"),
+    ("sysctls", "changes kernel parameters"),
+    ("volumes_from", "mounts another container's volumes"),
+    ("extends", "pulls in a service from a file outside this one"),
+    ("secrets", "reads files on the host"),
+    ("configs", "reads files on the host"),
+    ("external_links", "links to containers outside this preview"),
+    ("group_add", "adds host groups to the container's user"),
+    ("runtime", "chooses the container runtime"),
+    ("isolation", "chooses the isolation technology"),
+    ("storage_opt", "sets storage driver options"),
+    ("ulimits", "raises resource limits"),
+    ("develop", "watches and syncs host paths"),
+    ("credential_spec", "reads a credential file on the host"),
+];
+
+/// `build:` keys a preview may use.
+const BUILD_KEYS: &[&str] = &[
+    "context",
+    "dockerfile",
+    "dockerfile_inline",
+    "args",
+    "target",
+    "labels",
+    "cache_from",
+    "cache_to",
+    "no_cache",
+    "pull",
+    "tags",
+    "platforms",
+    "shm_size",
+];
+
+/// `build:` keys that reach outside the stack's own folder or the build sandbox.
+const BUILD_REFUSED: &[(&str, &str)] = &[
+    ("additional_contexts", "reads paths outside the stack's folder"),
+    ("ssh", "hands the build an SSH agent or key"),
+    ("secrets", "reads files on the host"),
+    ("privileged", "runs build steps with the host's own privileges"),
+    ("network", "joins another network namespace at build time"),
+    ("extra_hosts", "changes the build's host resolution"),
+    ("isolation", "chooses the isolation technology"),
+    ("ulimits", "raises resource limits"),
+    ("entitlements", "grants build entitlements"),
+];
+
+/// Whether a path a compose file names stays inside the stack's own folder:
+/// relative, never climbing out, nothing the shell or compose would expand,
+/// nothing fetched from elsewhere. Used for build contexts, Dockerfiles,
+/// `env_file`s and bind-mount sources alike — every path is resolved against
+/// the folder the compose file is in, which is the branch under review.
+fn stays_inside(path: &str) -> bool {
+    let p = path.trim();
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.starts_with('\\')
+        && !p.starts_with('~')
+        && !p.contains('$')
+        && !p.contains("://")
+        && !p.starts_with("git@")
+        // `C:\…` and `C:/…`.
+        && !(p.len() > 1 && p.as_bytes()[1] == b':' && p.as_bytes()[0].is_ascii_alphabetic())
+        && !p.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// A short-form volume source that names a volume rather than a path.
+fn is_named_volume(source: &str) -> bool {
+    !source.is_empty()
+        && !source.contains(['/', '\\'])
+        && !source.starts_with(['.', '~', '$'])
+}
+
+/// The names of a mapping, for walking its keys.
+fn keys(map: &serde_yaml::Mapping) -> impl Iterator<Item = &str> {
+    map.keys().filter_map(Value::as_str)
+}
+
+/// Refuse a document that asks for anything outside the preview. See the
+/// module comment for why this is an allow-list and why it refuses rather
+/// than strips.
+fn vet(doc: &Value) -> Result<(), ComposeError> {
+    let Some(top) = doc.as_mapping() else {
+        return Err(ComposeError::NoServices);
+    };
+    for key in keys(top) {
+        if let Some((_, why)) = TOP_LEVEL_REFUSED.iter().find(|(k, _)| *k == key) {
+            return Err(ComposeError::Refused {
+                service: None,
+                key: key.into(),
+                why,
+            });
+        }
+        if !TOP_LEVEL_KEYS.contains(&key) && !key.starts_with("x-") {
+            return Err(ComposeError::Unsupported {
+                service: None,
+                key: key.into(),
+            });
+        }
+    }
+    vet_top_level_volumes(top)?;
+    vet_top_level_networks(top)?;
+
+    let Some(services) = top.get("services").and_then(Value::as_mapping) else {
+        return Err(ComposeError::NoServices);
+    };
+    for (name, spec) in services {
+        let name = name.as_str().unwrap_or("?").to_string();
+        let refused = |key: &str, why: &'static str| ComposeError::Refused {
+            service: Some(name.clone()),
+            key: key.into(),
+            why,
+        };
+        let Some(map) = spec.as_mapping() else {
+            continue;
+        };
+        for key in keys(map) {
+            if let Some((_, why)) = SERVICE_REFUSED.iter().find(|(k, _)| *k == key) {
+                return Err(refused(key, why));
+            }
+            if !SERVICE_KEYS.contains(&key) && !key.starts_with("x-") {
+                return Err(ComposeError::Unsupported {
+                    service: Some(name.clone()),
+                    key: key.into(),
+                });
+            }
+        }
+        if let Some(build) = map.get("build") {
+            vet_build(&name, build)?;
+        }
+        if let Some(files) = map.get("env_file") {
+            let paths: Vec<&Value> = match files {
+                Value::Sequence(list) => list.iter().collect(),
+                one => vec![one],
+            };
+            for entry in paths {
+                let path = match entry {
+                    Value::String(s) => Some(s.as_str()),
+                    Value::Mapping(m) => m.get("path").and_then(Value::as_str),
+                    _ => None,
+                };
+                if !path.is_some_and(stays_inside) {
+                    return Err(refused("env_file", "reads a file outside the stack's folder"));
+                }
+            }
+        }
+        if let Some(Value::Sequence(volumes)) = map.get("volumes") {
+            for entry in volumes {
+                vet_volume(&name, entry)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn vet_build(service: &str, build: &Value) -> Result<(), ComposeError> {
+    let refused = |key: &str, why: &'static str| ComposeError::Refused {
+        service: Some(service.to_string()),
+        key: key.into(),
+        why,
+    };
+    match build {
+        Value::String(context) if stays_inside(context) => Ok(()),
+        Value::String(_) => Err(refused("build", "builds from outside the stack's folder")),
+        Value::Mapping(map) => {
+            for key in keys(map) {
+                if let Some((_, why)) = BUILD_REFUSED.iter().find(|(k, _)| *k == key) {
+                    return Err(refused(&format!("build.{key}"), why));
+                }
+                if !BUILD_KEYS.contains(&key) && !key.starts_with("x-") {
+                    return Err(ComposeError::Unsupported {
+                        service: Some(service.to_string()),
+                        key: format!("build.{key}"),
+                    });
+                }
+            }
+            for key in ["context", "dockerfile"] {
+                if let Some(path) = map.get(key) {
+                    if !path.as_str().is_some_and(stays_inside) {
+                        return Err(refused(
+                            &format!("build.{key}"),
+                            "builds from outside the stack's folder",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Err(ComposeError::Unsupported {
+            service: Some(service.to_string()),
+            key: "build".into(),
+        }),
+    }
+}
+
+fn vet_volume(service: &str, entry: &Value) -> Result<(), ComposeError> {
+    let refused = |why: &'static str| ComposeError::Refused {
+        service: Some(service.to_string()),
+        key: "volumes".into(),
+        why,
+    };
+    const HOST_PATH: &str = "mounts a path from the host";
+    match entry {
+        // `src:dst[:mode]`, or a bare container path (an anonymous volume).
+        Value::String(short) => {
+            // `C:\\code:/app` — a Windows drive, which the colon split below
+            // would otherwise read as a volume called `C`.
+            let b = short.as_bytes();
+            if b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/') {
+                return Err(refused(HOST_PATH));
+            }
+            let mut parts = short.splitn(3, ':');
+            let first = parts.next().unwrap_or("");
+            let Some(_destination) = parts.next() else {
+                return Ok(());
+            };
+            if is_named_volume(first) || stays_inside(first) {
+                Ok(())
+            } else {
+                Err(refused(HOST_PATH))
+            }
+        }
+        Value::Mapping(long) => {
+            let kind = long.get("type").and_then(Value::as_str);
+            let source = long.get("source").and_then(Value::as_str);
+            match kind {
+                Some("tmpfs") => Ok(()),
+                Some("volume") => match source {
+                    None => Ok(()),
+                    Some(s) if is_named_volume(s) => Ok(()),
+                    Some(_) => Err(refused(HOST_PATH)),
+                },
+                Some("bind") | None => match source {
+                    None => Ok(()),
+                    Some(s) if is_named_volume(s) || stays_inside(s) => Ok(()),
+                    Some(_) => Err(refused(HOST_PATH)),
+                },
+                Some(_) => Err(refused("mounts something that is not a volume or a path")),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn vet_top_level_volumes(top: &serde_yaml::Mapping) -> Result<(), ComposeError> {
+    let Some(Value::Mapping(volumes)) = top.get("volumes") else {
+        return Ok(());
+    };
+    for (name, spec) in volumes {
+        let Some(map) = spec.as_mapping() else {
+            continue;
+        };
+        for key in keys(map) {
+            let why = match key {
+                "driver" | "driver_opts" => "binds the volume to a host path or driver",
+                "external" | "name" => "reuses a volume outside this preview's namespace",
+                "labels" => continue,
+                _ => {
+                    return Err(ComposeError::Unsupported {
+                        service: None,
+                        key: format!("volumes.{}.{key}", name.as_str().unwrap_or("?")),
+                    })
+                }
+            };
+            return Err(ComposeError::Refused {
+                service: None,
+                key: format!("volumes.{}.{key}", name.as_str().unwrap_or("?")),
+                why,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn vet_top_level_networks(top: &serde_yaml::Mapping) -> Result<(), ComposeError> {
+    let Some(Value::Mapping(networks)) = top.get("networks") else {
+        return Ok(());
+    };
+    for (name, spec) in networks {
+        let Some(map) = spec.as_mapping() else {
+            continue;
+        };
+        let label = |key: &str| format!("networks.{}.{key}", name.as_str().unwrap_or("?"));
+        for key in keys(map) {
+            let why = match key {
+                "external" | "name" => "joins a network outside this preview's namespace",
+                "driver_opts" => "sets network driver options",
+                "driver" if map.get("driver").and_then(Value::as_str) != Some("bridge") => {
+                    "uses a network driver other than bridge, the host's included"
+                }
+                "driver" | "internal" | "labels" | "ipam" | "attachable" | "enable_ipv6" => {
+                    continue
+                }
+                _ => {
+                    return Err(ComposeError::Unsupported {
+                        service: None,
+                        key: label(key),
+                    })
+                }
+            };
+            return Err(ComposeError::Refused {
+                service: None,
+                key: label(key),
+                why,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn is_webbish(name: &str) -> bool {
@@ -543,6 +1016,159 @@ services:
         let p = plan(r#"services: {web: {image: nginx}, db: {image: postgres}}"#).unwrap();
         assert_eq!(p.service, "web");
         assert!(p.port_assumed);
+    }
+
+    /// A stack is agent-written code, and compose is a fluent way to ask for
+    /// the host. Every key that does is refused with its name, whole.
+    #[test]
+    fn refuses_every_key_that_reaches_outside_the_preview() {
+        for (key, _) in SERVICE_REFUSED {
+            let text = format!("services:\n  api:\n    image: x\n    {key}: true\n");
+            match plan(&text) {
+                Err(ComposeError::Refused { service, key: k, .. }) => {
+                    assert_eq!(service.as_deref(), Some("api"), "{key}");
+                    assert_eq!(k, *key);
+                }
+                other => panic!("{key} was not refused: {other:?}"),
+            }
+        }
+        for (key, _) in TOP_LEVEL_REFUSED {
+            let text = format!("services: {{web: {{image: x}}}}\n{key}: {{}}\n");
+            assert!(
+                matches!(plan(&text), Err(ComposeError::Refused { service: None, .. })),
+                "{key}"
+            );
+        }
+        // The message names the place and the key, which is what the person
+        // about to click Preview needs.
+        let m = plan("services: {api: {privileged: true}}").unwrap_err().message();
+        assert!(m.contains("`privileged`") && m.contains("`api`"), "{m}");
+    }
+
+    #[test]
+    fn an_unknown_service_key_is_refused_not_ignored() {
+        for text in [
+            "services: {web: {image: x, made_up: 1}}",
+            "services: {web: {image: x, build: {context: ., ssh: default}}}",
+            "services: {web: {image: x}}\nmade_up: 1",
+        ] {
+            let e = plan(text).unwrap_err();
+            assert!(
+                matches!(
+                    e,
+                    ComposeError::Unsupported { .. } | ComposeError::Refused { .. }
+                ),
+                "{text}: {e:?}"
+            );
+        }
+        // Extension fields are the one open door, by compose's own rule.
+        assert!(plan("x-shared: {a: 1}\nservices: {web: {image: x, x-note: hi}}").is_ok());
+    }
+
+    #[test]
+    fn a_host_path_bind_is_refused_a_relative_one_is_not() {
+        for src in [
+            "/var/run/docker.sock",
+            "/",
+            "~/.ssh",
+            "../../etc",
+            "${HOME}",
+            "$PWD/x",
+            "C:\\Users",
+        ] {
+            let text = format!("services:\n  web:\n    image: x\n    volumes: ['{src}:/x']\n");
+            assert!(
+                matches!(plan(&text), Err(ComposeError::Refused { key, .. }) if key == "volumes"),
+                "{src}"
+            );
+        }
+        let long = "services:\n  web:\n    image: x\n    volumes:\n      - type: bind\n        source: /etc\n        target: /x\n";
+        assert!(matches!(plan(long), Err(ComposeError::Refused { .. })));
+
+        for ok in ["./src:/app", "src:/app:ro", "data:/data", "/just/a/container/path"] {
+            let text = format!("services:\n  web:\n    image: x\n    volumes: ['{ok}']\n");
+            assert!(plan(&text).is_ok(), "{ok}");
+        }
+        let long_ok = "services:\n  web:\n    image: x\n    volumes:\n      - type: bind\n        source: ./src\n        target: /app\n      - type: volume\n        source: data\n        target: /data\n      - type: tmpfs\n        target: /tmp\n";
+        assert!(plan(long_ok).is_ok());
+    }
+
+    #[test]
+    fn a_remote_or_climbing_build_context_is_refused() {
+        for ctx in ["../other", "/srv/code", "https://github.com/x/y.git", "git@github.com:x/y.git", "~/code"] {
+            let short = format!("services: {{web: {{build: '{ctx}'}}}}");
+            assert!(matches!(plan(&short), Err(ComposeError::Refused { .. })), "{ctx}");
+            let long = format!("services: {{web: {{build: {{context: '{ctx}'}}}}}}");
+            assert!(matches!(plan(&long), Err(ComposeError::Refused { .. })), "{ctx}");
+        }
+        assert!(matches!(
+            plan("services: {web: {build: {context: ., dockerfile: ../Dockerfile}}}"),
+            Err(ComposeError::Refused { .. })
+        ));
+        assert!(matches!(
+            plan("services: {web: {image: x, env_file: ../.env}}"),
+            Err(ComposeError::Refused { key, .. }) if key == "env_file"
+        ));
+        assert!(plan("services: {web: {build: {context: ./api, dockerfile: Dockerfile.dev, args: {A: 1}}, env_file: [.env, {path: .env.local, required: false}]}}").is_ok());
+    }
+
+    #[test]
+    fn top_level_volumes_and_networks_stay_namespaced() {
+        for text in [
+            "services: {web: {image: x}}\nvolumes: {data: {external: true}}",
+            "services: {web: {image: x}}\nvolumes: {data: {name: theirs}}",
+            "services: {web: {image: x}}\nvolumes: {data: {driver: local, driver_opts: {type: none, o: bind, device: /}}}",
+            "services: {web: {image: x}}\nnetworks: {app: {external: true}}",
+            "services: {web: {image: x}}\nnetworks: {app: {driver: host}}",
+            "services: {web: {image: x}}\nnetworks: {app: {driver_opts: {parent: eth0}}}",
+        ] {
+            assert!(
+                matches!(plan(text), Err(ComposeError::Refused { service: None, .. })),
+                "{text}"
+            );
+        }
+        // What a real stack declares.
+        assert!(plan(REAL).is_ok());
+        assert!(plan("services: {web: {image: x}}\nvolumes: {data: null, logs: {labels: {a: b}}}\nnetworks: {app: {driver: bridge, internal: true}}").is_ok());
+    }
+
+    #[test]
+    fn every_service_is_hardened_on_render() {
+        let out = plan(REAL).unwrap().render(&ID, loopback(54321));
+        let doc: Value = serde_yaml::from_str(&out).unwrap();
+        let services = doc.get("services").unwrap().as_mapping().unwrap();
+        assert_eq!(services.len(), 2);
+        for (_, spec) in services {
+            let opts = spec.get("security_opt").unwrap().as_sequence().unwrap();
+            assert_eq!(opts, &[Value::String("no-new-privileges:true".into())], "{out}");
+            assert_eq!(
+                spec.get("mem_limit").and_then(Value::as_str),
+                Some(super::super::docker::PREVIEW_MEMORY)
+            );
+            assert_eq!(
+                spec.get("cpus").and_then(Value::as_u64),
+                Some(super::super::docker::PREVIEW_CPUS)
+            );
+            assert_eq!(
+                spec.get("pids_limit").and_then(Value::as_u64),
+                Some(super::super::docker::PREVIEW_PIDS)
+            );
+        }
+    }
+
+    #[test]
+    fn a_container_name_is_stripped_like_a_port() {
+        let p = plan("services: {web: {image: x, container_name: my-real-app}}").unwrap();
+        assert!(!p.stripped().contains("my-real-app"));
+    }
+
+    #[test]
+    fn a_stack_is_recognised_even_when_it_will_be_refused() {
+        let privileged = "services: {web: {image: x, privileged: true}}";
+        assert!(looks_like_stack(privileged));
+        assert!(plan(privileged).is_err());
+        assert!(!looks_like_stack("FROM nginx"));
+        assert!(!looks_like_stack("services: {}"));
     }
 
     #[test]
