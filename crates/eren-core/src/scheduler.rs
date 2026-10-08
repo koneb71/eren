@@ -90,6 +90,9 @@ pub struct Scheduler {
     orchestrator: Arc<Orchestrator>,
     /// When the ledger was last pruned. Hourly is plenty for a 90-day window.
     last_prune: std::sync::Mutex<Option<std::time::Instant>>,
+    /// How long finished runs keep their transcripts (`retention::days`),
+    /// read once at start; `None` keeps them forever.
+    event_retention_days: Option<u32>,
 }
 
 impl Scheduler {
@@ -98,6 +101,7 @@ impl Scheduler {
             db,
             orchestrator,
             last_prune: std::sync::Mutex::new(None),
+            event_retention_days: crate::retention::days(),
         }
     }
 
@@ -116,6 +120,17 @@ impl Scheduler {
             }
             if let Err(e) = crate::sessions::prune(&self.db).await {
                 tracing::warn!(error = %e, "could not prune expired sessions");
+            }
+            if let Some(days) = self.event_retention_days {
+                match crate::retention::prune_events(&self.db, days).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        n,
+                        days,
+                        "removed the transcripts of runs finished outside the retention window"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "could not prune old transcripts"),
+                }
             }
         }
     }

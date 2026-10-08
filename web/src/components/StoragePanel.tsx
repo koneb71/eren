@@ -128,8 +128,10 @@ export function StoragePanel({ projectId }: { projectId: string }) {
         <span className="font-medium text-fg">Kept on purpose.</span> This
         project's run history — {held.history.events.toLocaleString()} events,
         about {size(held.history.bytes)} — is what a reconnecting page replays
-        from, so nothing trims it. Deleting a card takes its own history with it.
-        There is no retention policy yet; when there is, it will live here.
+        from, so nothing trims it unless <code>EREN_EVENT_RETENTION_DAYS</code> is
+        set, which removes the transcripts of runs finished more than that many
+        days ago (the run, its cost and its summary stay). Deleting a card takes
+        its own history with it.
         <div className="mt-1.5">
           Per-run leftovers — generated MCP configs, engine prompt files, preview
           build logs — are swept at every start, once their run is finished.

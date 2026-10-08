@@ -396,6 +396,12 @@ several steps writing concurrently and `(run_id, seq)` is unique. Permission eve
 deliberate exception: `seq: -1`, ephemeral, never part of the replay log, and always passed
 through live.
 
+Nothing trims the log unless the operator says so: `EREN_EVENT_RETENTION_DAYS`
+(`eren_core::retention`) deletes the events of runs that *finished* more than that many days
+ago, hourly from the scheduler, and leaves the run row — status, cost, tokens, error — and
+everything said about the card. Unset, every event is kept forever, which is also what every
+backup carries.
+
 ### Concurrency, parking and rate limits
 
 `run_loop` holds one permit from `Slots` for the whole of `execute`. That is right while a
@@ -782,7 +788,7 @@ describes.
 `audit_log` is append-only and has exactly one writer, `audit::record`;
 `only_this_module_writes_the_ledger` fails the build for any other `INSERT`/`UPDATE`/`DELETE`
 on it, and the only delete is its retention `prune` (agent and system rows after
-`RETENTION_DAYS` = 90; API rows kept), run hourly by the scheduler. Recording never fails the
+`RETENTION_DAYS` = 90; API rows kept indefinitely), run hourly by the scheduler. Recording never fails the
 thing it records — a row that could not be written is logged and dropped.
 
 Three things feed it, as `audit::Actor`:

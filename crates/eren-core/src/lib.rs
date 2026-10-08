@@ -29,6 +29,7 @@ pub mod previews;
 pub mod queue;
 pub mod rag;
 pub mod reaper;
+pub mod retention;
 pub mod repo;
 pub mod review;
 pub mod revisions;

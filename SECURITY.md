@@ -317,7 +317,11 @@ to a model and stays readable in the run transcript.
 
 Run transcripts, prompts, diffs and costs are stored in Postgres, and Eren boots and manages
 its own cluster under `~/.eren/pgdata` unless `DATABASE_URL` is set. Assume everything an
-agent read or wrote during a run is recoverable from that database and from `~/.eren`.
+agent read or wrote during a run is recoverable from that database and from `~/.eren` — and
+from every backup of them — for as long as it is kept, which is forever unless
+`EREN_EVENT_RETENTION_DAYS` prunes the transcripts of runs finished outside its window
+(`eren_core::retention`; the run's own row, cost and summary stay). The audit log keeps API
+rows indefinitely.
 
 ## Files Eren writes outside a run's folder
 

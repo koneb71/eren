@@ -288,7 +288,8 @@ async fn storage(
 
     // Kept, and said so rather than shown as a number with a dead button next
     // to it. Run history is what a reconnecting client replays from, so
-    // trimming it is a policy decision nobody has made yet.
+    // trimming it is the operator's standing decision — `EREN_EVENT_RETENTION_DAYS`
+    // (`eren_core::retention`), not a button here.
     let history: (i64, i64) = sqlx::query_as(
         "SELECT count(*), coalesce(sum(pg_column_size(e.payload)), 0)
            FROM events e

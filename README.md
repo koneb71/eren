@@ -1249,6 +1249,7 @@ does not read a `.env` file — only Docker Compose does.
 | `EREN_ACCESS_TOKEN` | generated | The token every caller that is not this machine must present — on any bind, since a container can reach even a loopback-bound port through Docker's gateway. Unset, Eren makes a random one on first start and keeps it in `~/.eren/access_token`; set it to choose your own (16+ letters, digits, `-_.~`), or to `off` for no token — which on a wide bind then also needs `EREN_TRUST_NETWORK`. |
 | `EREN_TRUST_NETWORK` | unset | Set to anything but empty, `0`, `false`, `no` or `off` to acknowledge running beyond loopback **without** a token (`EREN_ACCESS_TOKEN=off`), where anyone who can reach the port can use this machine's agents. Not needed with the token on. |
 | `EREN_MAX_CONCURRENT` | `2` | How many agent processes run at once. Higher values burn through a subscription's rolling rate limits faster. |
+| `EREN_EVENT_RETENTION_DAYS` | unset | Delete the transcripts of runs that finished more than this many days ago (the `events` table: tool inputs, file contents, the model's text), hourly. The run, its cost and its summary stay; a pruned run's transcript view is empty. Unset or `0` keeps everything forever — and every backup then carries it. |
 | `EREN_WEB_DIST` | `web/dist` | Where the dashboard build is served from, relative to the working directory unless absolute. |
 | `EREN_BROWSE_ROOT` | `$HOME` | The only tree the folder browser may show, and the only one a folder may be loaded from, read in the Files tab or opened in the terminal; Eren's own apps and spaces folders are always allowed. In a container, point it at wherever your code is mounted. |
 | `EREN_APPS_DIR` | `~/.eren/apps` | Where apps live. |
@@ -1623,7 +1624,7 @@ Everything you would miss lives in three named volumes and one folder of your ow
 | Where | What |
 |---|---|
 | the Postgres volume | projects, chats and every message, cards, agents, settings |
-| the state volume (`~/.eren` in the container) | worktrees with agents' work in progress, attachments, apps, spaces |
+| the state volume (`~/.eren` in the container) | worktrees with agents' work in progress, attachments, apps, spaces — and the access token (`access_token`) and the per-run MCP configs (`mcp/<run>.json`, holding any headers or `env` you configured on an MCP server) |
 | `eren-claude` (`~/.claude` in the container) | the Claude Code sessions each chat resumes |
 | `EREN_PROJECTS_DIR`, bind-mounted | your code itself — on the host, never in a volume |
 
@@ -1654,8 +1655,10 @@ running the script — with `DOCKER_HOST=ssh://…`, your machine and not the se
 `pg_dump` of the database and the state and session volumes as tarballs (the re-downloadable
 model cache left out); the newest `EREN_BACKUP_KEEP`, 10 by default, are kept. It finds the
 volumes from the running containers, so it backs up whatever is actually mounted. Backups hold
-the database — settings, check commands, every conversation — so `backups/` is gitignored and
-readable by you alone.
+the database — settings, check commands, every conversation and every run's transcript (for as
+long as `EREN_EVENT_RETENTION_DAYS` keeps them) — and, in the state tarball, the access token
+and the MCP configs with any headers or `env` you configured, so `backups/` is gitignored and
+readable by you alone, and a copy kept elsewhere deserves the same care as `.env`.
 
 To put one back:
 
