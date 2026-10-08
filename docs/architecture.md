@@ -118,11 +118,13 @@ spawns the long-running loops (queue, scheduler, attachments, preview idling).
 `serve` manages its own Postgres under `~/.eren/pgdata` unless `DATABASE_URL` is set, so a
 fresh checkout has nothing to install. It binds loopback unless `EREN_BIND` says otherwise.
 There is no login, so on loopback the only thing keeping transcripts and files private is that
-the only caller is this machine. A non-loopback bind turns on the access token
-(`eren_server::access`, `Exposure::Protected`): the outermost layer passes a caller whose TCP
-peer is loopback and asks every other one for the token — once, through an access link that
-becomes a cookie, or as a bearer header — while `EREN_ALLOWED_HOSTS` adds the names the Host
-and Origin checks accept. `EREN_ACCESS_TOKEN=off` goes back to no token, and then a wide bind
+the only caller is this machine. The access token (`eren_server::access`) exists on every bind:
+the outermost layer passes a caller whose TCP peer is loopback and asks every other one for the
+token — once, through an access link that becomes a cookie, or as a bearer header — while
+`EREN_ALLOWED_HOSTS` adds the names the Host and Origin checks accept. On a loopback bind the
+only such peer is a container reaching the port through Docker's gateway, which is exactly who
+should be asked; a wide bind (`Exposure::Protected`) is what makes other machines meet it.
+`/mcp` answers loopback peers only, whatever the token or the account state. `EREN_ACCESS_TOKEN=off` goes back to no token, and then a wide bind
 is refused unless `EREN_TRUST_NETWORK` is set too (`eren_server::exposure`). Once an admin
 exists (`eren admin create`), accounts replace all of that: `auth::require_session`, just inside
 the token layer, asks every caller for a session cookie, puts the `Caller` in the request, and

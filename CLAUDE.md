@@ -171,7 +171,7 @@ A card's run also gets Eren's own toolbox on `/mcp/run/{run_id}` ([crates/eren-s
 
 ### Network access
 
-Until accounts are on (below), on loopback (the default) there is no login, and the only caller is this machine. A wide `EREN_BIND` turns on the access token (`eren_server::access`, the outermost layer): a caller whose **TCP peer** is loopback passes, every other caller presents the token — an access link (`/?access=…`) trades it for an `HttpOnly` cookie, scripts send a bearer header. `EREN_ALLOWED_HOSTS` adds the names the Host and Origin checks in `reject_non_local_callers` accept (names only, exact authority). Two rules: **"local" is decided by the peer address, never a header** (a header is whatever the caller says); and the token is one of `env_guard::OWN_SECRETS`, so no child sees it. `EREN_ACCESS_TOKEN=off` restores no-token behaviour, which a wide bind must then acknowledge with `EREN_TRUST_NETWORK` (`eren_server::exposure`).
+Until accounts are on (below), on loopback (the default) there is no login, and the only caller is this machine. The access token (`eren_server::access`, the outermost layer) exists on every bind, not only a wide one — a container reaches even a loopback-bound port through Docker's gateway, and its peer is not loopback: a caller whose **TCP peer** is loopback passes, every other caller presents the token — an access link (`/?access=…`) trades it for an `HttpOnly` cookie, scripts send a bearer header. `/mcp` answers loopback peers only (`mcp::this_machine_only`), whatever the token or the account state: its callers are identified by a run id alone and are always on this machine. `EREN_ALLOWED_HOSTS` adds the names the Host and Origin checks in `reject_non_local_callers` accept (names only, exact authority). Two rules: **"local" is decided by the peer address, never a header** (a header is whatever the caller says); and the token is one of `env_guard::OWN_SECRETS`, so no child sees it. `EREN_ACCESS_TOKEN=off` restores no-token behaviour, which a wide bind must then acknowledge with `EREN_TRUST_NETWORK` (`eren_server::exposure`).
 
 ### Accounts
 
@@ -237,6 +237,9 @@ they still only ever work in a worktree, which is what keeps a run reviewable.
 The write path carries its own gates (no `.git`, a root allow-list, a content
 hash, and a header no cross-origin request can set); they are documented at the
 top of [crates/eren-server/src/routes/files.rs](crates/eren-server/src/routes/files.rs).
+The root allow-list is `fs::may_open` — under `EREN_BROWSE_ROOT`, or Eren's own apps and
+spaces folders — and it is the one answer for loading a folder (`POST /api/projects`), reading
+or writing its files, and opening a terminal in it, so the three cannot disagree.
 
 ### Checks and follow-ups
 

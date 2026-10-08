@@ -19,8 +19,9 @@
 //!
 //! "Loopback" is the TCP peer, never a header — the same rule as the token.
 //!
-//! An account whose password the admin reset reaches nothing but
-//! `/api/auth/…` until it chooses a new one.
+//! An account whose password the admin reset reaches nothing under `/api` or
+//! `/ws` but `/api/auth/…` until it chooses a new one — the terminal and the
+//! event stream included, not only the REST routes.
 
 use crate::routes::{internal, ApiError};
 use crate::AppState;
@@ -329,6 +330,12 @@ pub(crate) enum Open {
     FromLoopback,
 }
 
+/// Whether `path` is `prefix` or a path below it — a path segment, not a
+/// string prefix, so `/apidocs` is not under `/api`.
+fn under(path: &str, prefix: &str) -> bool {
+    path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
 pub(crate) fn open_path(path: &str) -> Open {
     const PUBLIC_API: [&str; 5] = [
         "/api/health",
@@ -340,11 +347,10 @@ pub(crate) fn open_path(path: &str) -> Open {
     if PUBLIC_API.contains(&path) {
         return Open::Yes;
     }
-    let under = |prefix: &str| path == prefix || path.starts_with(&format!("{prefix}/"));
-    if under("/mcp") {
+    if under(path, "/mcp") {
         return Open::FromLoopback;
     }
-    if under("/api") || under("/ws") {
+    if under(path, "/api") || under(path, "/ws") {
         return Open::No;
     }
     // The dashboard's files (the sign-in page is one of them). A preview or
@@ -355,6 +361,14 @@ pub(crate) fn open_path(path: &str) -> Open {
 /// Paths an account that must change its password may still reach.
 fn while_changing_password(path: &str) -> bool {
     path.starts_with("/api/auth/")
+}
+
+/// What a temporary password does not open: the API and the sockets — the
+/// terminal is a shell and `/ws` is every transcript — until the account has
+/// chosen a password of its own. The dashboard's files stay reachable, since
+/// the page that changes the password is one of them.
+pub(crate) fn gated_while_changing_password(path: &str) -> bool {
+    (under(path, "/api") || under(path, "/ws")) && !while_changing_password(path)
 }
 
 /// The middleware: decides the [`Caller`] and puts it in the request.
@@ -388,10 +402,7 @@ pub async fn require_session(
     let path = req.uri().path().to_string();
     match user {
         Some(user) => {
-            if user.must_change_password
-                && !while_changing_password(&path)
-                && path.starts_with("/api/")
-            {
+            if user.must_change_password && gated_while_changing_password(&path) {
                 return (
                     StatusCode::FORBIDDEN,
                     "Choose a new password first: the admin reset this one.",
@@ -449,6 +460,25 @@ mod tests {
         // A prefix is a path segment, not a string prefix.
         assert_eq!(open_path("/apidocs"), Open::Yes);
         assert_eq!(open_path("/mcpx"), Open::Yes);
+    }
+
+    /// A temporary password opens the page that replaces it and nothing
+    /// else — not the API, and not the sockets behind it.
+    #[test]
+    fn a_temporary_password_opens_nothing_but_the_way_to_change_it() {
+        for gated in ["/api/tasks", "/api", "/ws", "/ws/terminal/x", "/ws/terminal"] {
+            assert!(gated_while_changing_password(gated), "{gated}");
+        }
+        for open in [
+            "/api/auth/password",
+            "/api/auth/logout",
+            "/",
+            "/assets/app.js",
+            "/projects/x",
+            "/mcp/run/x",
+        ] {
+            assert!(!gated_while_changing_password(open), "{open}");
+        }
     }
 
     #[test]

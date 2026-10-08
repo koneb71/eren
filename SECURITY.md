@@ -82,14 +82,22 @@ prefix and the old header are accepted under exactly the same gates
 
 Setting `EREN_BIND` to anything that is not loopback makes the server reachable from your
 network, where none of the above is a defence: `curl -H 'Host: localhost'` from across the room
-sets that header itself. So a wide bind turns on the **access token**
-(`crates/eren-server/src/access.rs`), and every caller that is not this machine must present it:
+sets that header itself. What stands in front of the port there is the **access token**
+(`crates/eren-server/src/access.rs`): every caller that is not this machine must present it.
+The token exists from the first start, on every bind — not only a wide one — because a
+loopback-bound port is reached by more than this machine's own processes: Docker Desktop
+delivers a container's connection to `host.docker.internal` with the gateway as its peer, and a
+preview container is an unreviewed branch's code. Binding wide is what makes *other machines*
+meet the token; the container case meets it either way.
 
 - **"This machine" is the TCP peer address**, read from the connection, never a header. The
   agent CLIs Eren spawns reach `/mcp` over loopback and are never asked; everything else —
   the API, the WebSocket, the terminal, previews and app bridges — is refused with a 401 by a
-  layer outside every other one. A request with no peer address fails closed.
-- The token is 244 random bits, generated on first use into `~/.eren/access_token`, created
+  layer outside every other one. A request with no peer address fails closed. `/mcp` goes one
+  step further: it answers loopback peers *only*, whatever the token or the account state
+  (`mcp::this_machine_only`), because its callers are identified by a run id alone and are
+  always on this machine.
+- The token is 244 random bits, generated on first start into `~/.eren/access_token`, created
   0600 in one step, or set with `EREN_ACCESS_TOKEN` (16+ URL-safe characters). It is one of
   `env_guard::OWN_SECRETS`, so no child process inherits it. Comparisons do not stop at the
   first differing byte.
@@ -110,8 +118,8 @@ sets that header itself. So a wide bind turns on the **access token**
 
 Deleting `~/.eren/access_token` and restarting signs every device out. `EREN_ACCESS_TOKEN=off`
 restores the old behaviour — no token — and then Eren refuses to start on a wide bind unless
-you also set `EREN_TRUST_NETWORK=1` (anything but empty or `0`), so that exposing an
-unauthenticated agent runner is a decision rather than a side effect.
+you also set `EREN_TRUST_NETWORK=1` (anything but empty, `0`, `false`, `no` or `off`), so that
+exposing an unauthenticated agent runner is a decision rather than a side effect.
 
 The container image sets `EREN_BIND=0.0.0.0` and `EREN_TRUST_NETWORK=1`, because inside a
 container the port is only reachable through an explicit mapping, and the host's browser
@@ -152,12 +160,19 @@ first boot and kept in `~/.eren/pg_password`.
 Two endpoints deserve naming, because they are arbitrary code execution and file writes by
 design, and their only gate is the one above:
 
-- `/ws/terminal/{project_id}` is a real shell in the project folder, running your login shell.
-- The Files tab writes to a checkout or a card's worktree when a person saves. Its own gates are
-  documented at the top of `crates/eren-server/src/routes/files.rs`: no path may contain a
+- `/ws/terminal/{project_id}` is a real shell in the project folder, running your login shell —
+  only for a project whose folder Eren may open (`fs::may_open`: under `EREN_BROWSE_ROOT`, or
+  one of Eren's own apps or spaces folders), and every session opened is written to the audit
+  log.
+- The Files tab reads and writes a checkout or a card's worktree when a person asks. Its gates
+  are documented at the top of `crates/eren-server/src/routes/files.rs`: no path may contain a
   `.git` component (writing `.git/hooks/pre-commit` would be remote code execution, since Eren
-  runs `git checkout` and `git merge` in that repo), the tree must be one Eren is allowed to
-  write, a content hash must match what is on disk, and the request must carry the write header.
+  runs `git checkout` and `git merge` in that repo), the tree must be one Eren may open — the
+  same `fs::may_open`, for reads as for writes — a content hash must match what is on disk, and
+  the request must carry the write header.
+- `POST /api/projects` loads a folder from under `EREN_BROWSE_ROOT` and nowhere else, the same
+  sandbox the folder browser keeps. It used to take any directory that existed, and a project
+  at `/` was every file the server could read, in the Files tab and in the terminal.
 
 ### Accounts
 

@@ -1,5 +1,12 @@
 //! Local folder browser for "load folder". The server runs on the user's own
 //! machine; browsing is still sandboxed to one root and directory names only.
+//!
+//! This module also holds the one answer to "is this a folder Eren may open?"
+//! ([`may_open`]): under the browse root, or one of Eren's own managed folders
+//! (apps, spaces). Loading a folder as a project, reading its files, and
+//! opening a terminal in it all ask the same question here, so they cannot
+//! disagree — which is how, before, a project could be made at `/` and read
+//! from, while only *writing* to it was refused.
 
 use super::{internal, ApiError};
 use crate::auth::Caller;
@@ -37,6 +44,39 @@ pub(crate) fn sandboxed(root: &Path, requested: &Path) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(requested).ok()?;
     let root_canonical = std::fs::canonicalize(root).ok()?;
     canonical.starts_with(&root_canonical).then_some(canonical)
+}
+
+/// Where spaces live: folders of documents Eren makes and manages itself.
+pub(crate) fn spaces_root() -> PathBuf {
+    eren_shared::brand::home().join("spaces")
+}
+
+/// Every tree Eren may open a project in: the browse root, and its own
+/// managed folders. Apps and spaces sit under `~/.eren`, which in a container
+/// is outside `EREN_BROWSE_ROOT`; they are Eren's to make, so they are Eren's
+/// to open.
+pub(crate) fn managed_roots() -> Vec<PathBuf> {
+    vec![browse_root(), eren_core::apps::root(), spaces_root()]
+}
+
+/// The canonical path of `requested` if it lives under any of `roots`. A
+/// root that does not exist yet (no space has been made) is simply not a
+/// match; it cannot panic and it cannot widen anything.
+pub(crate) fn opens_under(roots: &[PathBuf], requested: &Path) -> Option<PathBuf> {
+    roots.iter().find_map(|root| sandboxed(root, requested))
+}
+
+/// Whether Eren may open `requested` — list it, read it, write it, open a
+/// shell in it. `Err` carries the sentence to show, with the remedy.
+pub(crate) fn may_open(requested: &Path) -> Result<PathBuf, String> {
+    opens_under(&managed_roots(), requested).ok_or_else(|| {
+        format!(
+            "this project's folder is outside the folder Eren is allowed to open \
+             (EREN_BROWSE_ROOT, or Eren's own apps and spaces folders). Set \
+             {} if that is deliberate.",
+            eren_shared::brand::env_name("BROWSE_ROOT")
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -185,8 +225,41 @@ async fn git_init(_caller: Caller, Json(body): Json<GitInitBody>) -> Result<Json
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_dir_name, sandboxed};
+    use super::{opens_under, safe_dir_name, sandboxed};
     use std::path::Path;
+
+    /// The one answer every door asks: under any managed root, and nowhere
+    /// else — not through a symlink, not through `..`, not a root that is
+    /// not there.
+    #[test]
+    fn opens_under_any_managed_root_and_nowhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let elsewhere = dir.path().join("elsewhere");
+        for d in [&a, &b, &elsewhere] {
+            std::fs::create_dir_all(d.join("inner")).unwrap();
+        }
+        let missing = dir.path().join("not-made-yet");
+        let roots = vec![a.clone(), missing.clone(), b.clone()];
+
+        assert!(opens_under(&roots, &a.join("inner")).is_some());
+        assert!(opens_under(&roots, &b.join("inner")).is_some());
+        assert!(opens_under(&roots, &b).is_some());
+        // A missing root is skipped, never matched and never a panic.
+        assert!(opens_under(&roots, &missing).is_none());
+        // Outside every root, however it is spelled.
+        assert!(opens_under(&roots, &elsewhere).is_none());
+        assert!(opens_under(&roots, &a.join("..").join("elsewhere")).is_none());
+        assert!(opens_under(&roots, dir.path()).is_none());
+        #[cfg(unix)]
+        {
+            let link = a.join("link");
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            assert!(opens_under(&roots, &link).is_none(), "a symlink out is out");
+        }
+        assert!(opens_under(&[], &a).is_none());
+    }
 
     #[test]
     fn a_folder_name_may_not_be_a_path() {

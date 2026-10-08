@@ -8,8 +8,15 @@
 //! is not the dashboard itself. Browsers attach `Origin` to every WebSocket
 //! upgrade, so a hostile page cannot open this socket.
 //!
-//! Two deliberate choices:
+//! Three deliberate choices:
 //!
+//! - It opens only in a folder Eren may open (`fs::may_open`): under the
+//!   browse root, or one of Eren's own apps or spaces folders — the same
+//!   answer loading a folder and the Files tab give. A project row is data,
+//!   not a grant, and a shell is the whole machine whatever its `cwd`, so the
+//!   admin is not exempt: the remedy is `EREN_BROWSE_ROOT`, not a bypass.
+//!   Every session opened is written to the audit log, which the `/api`
+//!   layer cannot see from here.
 //! - The shell gets the user's own login shell with the user's own
 //!   environment — except Eren's own secrets (`env_guard::OWN_SECRETS`),
 //!   stripped exactly as they are from every engine child. The user can read
@@ -27,6 +34,7 @@ use crate::auth::Caller;
 use crate::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -68,7 +76,50 @@ async fn open(
         .ok()
         .flatten()
         .map(|r| r.get("path"));
+    let path = gate(path)?;
+
+    // A shell opened is an action worth a ledger line, and this route is
+    // outside the `/api` layer that would otherwise write one.
+    let entry = eren_core::audit::Entry::new(caller.actor(), "terminal open")
+        .on("projects", project_id)
+        .summary(format!("opened a shell in {path}"));
+    let db = state.db.clone();
+    tokio::spawn(async move { eren_core::audit::record(&db, entry).await });
+
     Ok(ws.on_upgrade(move |socket| session(socket, path)))
+}
+
+/// The folder the shell may open in, or the refusal: the project's row must
+/// name a folder on disk that `fs::may_open` admits.
+fn gate(path: Option<String>) -> Result<String, ApiError> {
+    let Some(path) = path.filter(|p| std::path::Path::new(p).is_dir()) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "this project's folder is not on disk".into(),
+        ));
+    };
+    super::fs::may_open(std::path::Path::new(&path))
+        .map(|_| path)
+        .map_err(|why| (StatusCode::FORBIDDEN, why))
+}
+
+/// The shell, the way the person's own terminal would start it, in `path`:
+/// a login shell, with Eren's own secrets stripped from its environment.
+fn shell_command(path: &str) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(shell());
+    if !cfg!(windows) {
+        // A login shell, so the PATH the user's own terminal would have —
+        // node, cargo, pyenv — exists here too. The seconds it costs at open
+        // are cheaper than every tool being "not found".
+        cmd.arg("-l");
+    }
+    cmd.cwd(path);
+    cmd.env("TERM", "xterm-256color");
+    // The same strip every engine child gets, from the same list.
+    for key in eren_shared::own_secrets() {
+        cmd.env_remove(key);
+    }
+    cmd
 }
 
 /// The user's shell, the way their terminal would start it.
@@ -82,16 +133,7 @@ fn shell() -> String {
     })
 }
 
-async fn session(mut socket: WebSocket, path: Option<String>) {
-    let Some(path) = path.filter(|p| std::path::Path::new(p).is_dir()) else {
-        let _ = socket
-            .send(Message::Text(
-                "this project's folder is not on disk\r\n".into(),
-            ))
-            .await;
-        return;
-    };
-
+async fn session(mut socket: WebSocket, path: String) {
     let pty = match native_pty_system().openpty(PtySize {
         rows: 24,
         cols: 80,
@@ -109,19 +151,7 @@ async fn session(mut socket: WebSocket, path: Option<String>) {
         }
     };
 
-    let mut cmd = CommandBuilder::new(shell());
-    if !cfg!(windows) {
-        // A login shell, so the PATH the user's own terminal would have —
-        // node, cargo, pyenv — exists here too. The seconds it costs at open
-        // are cheaper than every tool being "not found".
-        cmd.arg("-l");
-    }
-    cmd.cwd(&path);
-    cmd.env("TERM", "xterm-256color");
-    // The same strip every engine child gets, from the same list.
-    for key in eren_shared::own_secrets() {
-        cmd.env_remove(key);
-    }
+    let cmd = shell_command(&path);
 
     let mut child = match pty.slave.spawn_command(cmd) {
         Ok(c) => c,
@@ -215,4 +245,46 @@ async fn session(mut socket: WebSocket, path: Option<String>) {
     // Whichever way the loop ended, the shell does not outlive the socket.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shell_opens_only_in_a_folder_eren_may_open() {
+        // Outside every managed root: a tempdir is not under $HOME, apps or
+        // spaces unless the machine is very unusual.
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().to_string_lossy().into_owned();
+        if super::super::fs::opens_under(&super::super::fs::managed_roots(), dir.path()).is_some()
+        {
+            // $HOME is /tmp here; nothing to prove on this machine.
+            return;
+        }
+        let (status, why) = gate(Some(outside)).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(why.contains("BROWSE_ROOT"), "{why}");
+        assert_eq!(gate(None).unwrap_err().0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            gate(Some("/definitely/not/a/dir".into())).unwrap_err().0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// What `env_guard::command` does for every other child, done by hand
+    /// here because the pty crate has its own builder.
+    #[test]
+    fn the_shell_does_not_inherit_what_eren_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = shell_command(&dir.path().to_string_lossy());
+        let env: Vec<String> = cmd
+            .iter_full_env_as_str()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        for key in eren_shared::own_secrets() {
+            assert!(!env.contains(&key), "{key} reached the shell");
+        }
+        assert!(env.contains(&"TERM".to_string()));
+    }
 }

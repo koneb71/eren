@@ -22,12 +22,15 @@
 //!    hook — remote code execution reached from a page someone merely visited.
 //!    A worktree is no safer: its `.git` is a *file* pointing into the main
 //!    repo's `.git/worktrees/<name>`, whose `commondir` shares `hooks/`.
-//! 2. **The root must be one we are allowed to write.** A checkout must sit
-//!    under `fs::browse_root()`, because `projects.rs` accepts any directory
-//!    that exists — a project row containing `/` is legal today, and without
-//!    this gate that row would make the whole filesystem writable. A worktree
-//!    must satisfy `WorktreeManager::manages`, the same check that gates
-//!    full-auto, so "is this tree ours" has exactly one answer.
+//! 2. **The root must be one Eren may open.** A checkout must satisfy
+//!    `fs::may_open` — under `EREN_BROWSE_ROOT`, or one of Eren's own apps or
+//!    spaces folders — which is the same answer loading a folder and the
+//!    terminal give. It gates *reads* too: a project row is data, not a
+//!    grant, and a row outside every root (one made before `projects.rs`
+//!    sandboxed its door, or a database write) used to read any file the
+//!    server could, up to 512 KB each. A worktree must satisfy
+//!    `WorktreeManager::manages`, the same check that gates full-auto, so "is
+//!    this tree ours" has exactly one answer.
 //! 3. **`baseHash` must match what is on disk.** Compare-and-write under a
 //!    mutex, so a save cannot land on top of bytes the caller never saw.
 //! 4. **A header no cross-origin request can set.** There is no CORS layer, so
@@ -93,9 +96,8 @@ fn relative(root: &Path, full: &Path) -> String {
 
 /// Where a tree lives on disk, and whether we may write to it.
 ///
-/// Reads are deliberately more permissive than writes: an existing project
-/// pointing somewhere odd should keep browsing exactly as it did, and only the
-/// new capability gets the new gate.
+/// A project tree that may be read may be written (gate 2 above answers both);
+/// a worktree may be written only if Eren manages it.
 struct Root {
     path: PathBuf,
     /// `Err` carries the sentence to show. Computed up front so a caller
@@ -103,18 +105,15 @@ struct Root {
     writable: Result<(), String>,
 }
 
-/// A project's checkout. Writable only if it sits under the browse root.
+/// A project's checkout — only one Eren may open at all (gate 2), which is
+/// then also writable.
 async fn project_tree(state: &AppState, id: Uuid) -> Result<Root, ApiError> {
     let path = project_root(state, id).await?;
-    let writable = match std::fs::canonicalize(&path) {
-        Ok(canonical) if canonical.starts_with(fs_browse_root()) => Ok(()),
-        Ok(_) => Err(format!(
-            "this project is outside the folder Eren may write to. Set \
-             EREN_BROWSE_ROOT if that is deliberate."
-        )),
-        Err(e) => Err(format!("this project's folder could not be read: {e}")),
-    };
-    Ok(Root { path, writable })
+    super::fs::may_open(&path).map_err(|why| (StatusCode::FORBIDDEN, why))?;
+    Ok(Root {
+        path,
+        writable: Ok(()),
+    })
 }
 
 /// A card's worktree. Writable only if the worktree manager owns it.
@@ -148,10 +147,6 @@ async fn task_tree(state: &AppState, id: Uuid) -> Result<Root, ApiError> {
         Err(_) => Err("this worktree is gone from disk".to_string()),
     };
     Ok(Root { path, writable })
-}
-
-fn fs_browse_root() -> PathBuf {
-    std::fs::canonicalize(super::fs::browse_root()).unwrap_or_else(|_| super::fs::browse_root())
 }
 
 async fn project_root(state: &AppState, id: Uuid) -> Result<PathBuf, ApiError> {
@@ -653,7 +648,7 @@ async fn search(
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
     caller.require(&state, Owned::Project(project_id)).await?;
-    let root = project_root(&state, project_id).await?;
+    let root = project_tree(&state, project_id).await?.path;
     let needle = q.q.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return Ok(Json(json!({ "files": [], "truncated": false })));

@@ -742,7 +742,7 @@ async fn create_space(
     };
     // Suffix on collision rather than ON CONFLICT-reuse: two spaces named
     // "notes" are two spaces, not one folder shared by surprise.
-    let base = eren_shared::brand::home().join("spaces");
+    let base = super::fs::spaces_root();
     let mut dir = base.join(&slug);
     let mut n = 2;
     while dir.exists() {
@@ -765,6 +765,7 @@ async fn create_space(
     Ok(Json(project_json(&row)))
 }
 
+
 #[derive(Deserialize)]
 struct CreateProject {
     workspace_id: Uuid,
@@ -786,6 +787,23 @@ async fn create(
         return Err((
             StatusCode::BAD_REQUEST,
             format!("{} is not a directory", body.path),
+        ));
+    }
+    // The same sandbox the folder browser, `mkdir` and `git-init` keep: a
+    // project is loaded from under the browse root and nowhere else. This
+    // door used to take any directory that existed, and a project at `/` is
+    // every file the server can read, in the Files tab and in the terminal.
+    // Apps, spaces and clones are made by their own routes under folders
+    // Eren manages, and `fs::may_open` admits those too.
+    if super::fs::sandboxed(&super::fs::browse_root(), path).is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} is outside the folder Eren is allowed to browse. Set {} if that is \
+                 deliberate.",
+                body.path,
+                eren_shared::brand::env_name("BROWSE_ROOT")
+            ),
         ));
     }
     let mine = caller.workspaces(&state).await?;
@@ -989,4 +1007,26 @@ async fn update(
     .ok_or((StatusCode::NOT_FOUND, "no such project".to_string()))?;
 
     Ok(Json(project_json(&row)))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `create` is the one door a person hands an arbitrary path to, and it
+    /// has to meet the sandbox before it inserts: the row is what the Files
+    /// tab and the terminal later open.
+    #[test]
+    fn create_sandboxes_the_path_before_it_inserts() {
+        let src = include_str!("projects.rs");
+        let start = src.find("async fn create(").expect("create exists");
+        let body = &src[start..];
+        let end = body.find("\n}\n").map(|i| i + 3).unwrap_or(body.len());
+        let body = &body[..end];
+        let sandbox = body
+            .find("fs::sandboxed(&super::fs::browse_root()")
+            .expect("create asks the browse-root sandbox");
+        let insert = body
+            .find("INSERT INTO projects")
+            .expect("create inserts the project");
+        assert!(sandbox < insert, "the sandbox check comes before the insert");
+    }
 }

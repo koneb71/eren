@@ -255,7 +255,8 @@ in the agent's editor drawer.
 
 ### Adding a folder
 
-Point Eren at any folder — it does not need to be a git repository. If it
+Point Eren at any folder under your home folder (`EREN_BROWSE_ROOT` to choose another
+tree) — it does not need to be a git repository. If it
 isn't one, Eren runs `git init` and makes a first commit of whatever is
 already there when you add it. You can also clone from GitHub, or publish a local folder as
 a new GitHub repository, when `gh` is logged in.
@@ -1240,13 +1241,13 @@ does not read a `.env` file — only Docker Compose does.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `EREN_BIND` | `127.0.0.1` | Address the dashboard listens on. Anything but loopback (`0.0.0.0` for every interface) turns on the access token, so other devices need the access link — see [using Eren from other devices](#using-eren-from-other-devices). An address that does not parse falls back to loopback. |
+| `EREN_BIND` | `127.0.0.1` | Address the dashboard listens on. Anything but loopback (`0.0.0.0` for every interface) lets other devices reach it, and they then need the access link — see [using Eren from other devices](#using-eren-from-other-devices). An address that does not parse falls back to loopback. |
 | `EREN_ALLOWED_HOSTS` | unset | Names other devices reach this machine by, separated by commas: `192.168.1.20`, `mybox.local`. Without one, the Host check refuses every other device. No ports, paths or wildcards. |
-| `EREN_ACCESS_TOKEN` | generated | The token other devices must present when Eren listens beyond loopback. Unset, Eren makes a random one and keeps it in `~/.eren/access_token`; set it to choose your own (16+ letters, digits, `-_.~`), or to `off` for no token — which then also needs `EREN_TRUST_NETWORK`. |
-| `EREN_TRUST_NETWORK` | unset | Set to anything but empty or `0` to acknowledge running beyond loopback **without** a token (`EREN_ACCESS_TOKEN=off`), where anyone who can reach the port can use this machine's agents. Not needed with the token on. |
+| `EREN_ACCESS_TOKEN` | generated | The token every caller that is not this machine must present — on any bind, since a container can reach even a loopback-bound port through Docker's gateway. Unset, Eren makes a random one on first start and keeps it in `~/.eren/access_token`; set it to choose your own (16+ letters, digits, `-_.~`), or to `off` for no token — which on a wide bind then also needs `EREN_TRUST_NETWORK`. |
+| `EREN_TRUST_NETWORK` | unset | Set to anything but empty, `0`, `false`, `no` or `off` to acknowledge running beyond loopback **without** a token (`EREN_ACCESS_TOKEN=off`), where anyone who can reach the port can use this machine's agents. Not needed with the token on. |
 | `EREN_MAX_CONCURRENT` | `2` | How many agent processes run at once. Higher values burn through a subscription's rolling rate limits faster. |
 | `EREN_WEB_DIST` | `web/dist` | Where the dashboard build is served from, relative to the working directory unless absolute. |
-| `EREN_BROWSE_ROOT` | `$HOME` | The only tree the folder browser may show. In a container, point it at wherever your code is mounted. |
+| `EREN_BROWSE_ROOT` | `$HOME` | The only tree the folder browser may show, and the only one a folder may be loaded from, read in the Files tab or opened in the terminal; Eren's own apps and spaces folders are always allowed. In a container, point it at wherever your code is mounted. |
 | `EREN_APPS_DIR` | `~/.eren/apps` | Where apps live. |
 | `EREN_PREVIEW_HOST` | `127.0.0.1` | The host Eren connects to a preview or container app on. Only Eren in a container needs another: `host.docker.internal`, which `docker-compose.previews.yml` sets — see [previews in Docker](#previews-in-docker). A host name or IP address, nothing else. |
 | `EREN_PREVIEW_PUBLISH_IP` | `127.0.0.1` | The host address Docker publishes previews on. Only Eren in a container on a Linux host needs another, the bridge gateway (`172.17.0.1`). Every interface (`0.0.0.0`, `::`) is refused, falling back to loopback. |
@@ -1290,7 +1291,11 @@ then on. Bookmark `http://192.168.1.20:4820` rather than the link.
 
 - **This machine never needs the token.** Who is local is decided by the connection's address,
   not by anything a request says, so the agent CLIs Eren starts and the browser here carry on
-  exactly as before.
+  exactly as before. The token exists on a loopback bind too — `~/.eren/access_token` is made
+  on the first start — because a container reaching the port through Docker's gateway is not
+  this machine; nothing on this machine ever meets it.
+- **`/mcp` answers this machine only**, whatever the token: the agent CLIs are the only thing
+  that calls it, and they are always here.
 - **Scripts** on another machine send `Authorization: Bearer <token>`.
 - **Signing every device out**: delete `~/.eren/access_token` and restart; a new token is made.
   Set `EREN_ACCESS_TOKEN` instead to choose the token yourself.
