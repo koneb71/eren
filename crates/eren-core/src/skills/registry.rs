@@ -142,6 +142,14 @@ struct LockSkill {
 pub fn parse_lock(json: &str) -> Result<Vec<LockEntry>, String> {
     let lock: LockFile =
         serde_json::from_str(json).map_err(|e| format!("could not read skills-lock.json: {e}"))?;
+    // A name becomes a path segment under `.agents/skills/`, and the lockfile
+    // was written from what a registry said. One segment, or the file is not
+    // one Eren reads.
+    if let Some(bad) = lock.skills.keys().find(|n| !is_single_segment(n)) {
+        return Err(format!(
+            "skills-lock.json names a skill {bad:?}, which is not a folder name"
+        ));
+    }
     Ok(lock
         .skills
         .into_iter()
@@ -152,6 +160,11 @@ pub fn parse_lock(json: &str) -> Result<Vec<LockEntry>, String> {
             hash: s.computed_hash,
         })
         .collect())
+}
+
+/// One folder name: not empty, no separators, not `.` or `..`, no NUL.
+fn is_single_segment(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
 /// What `npx skills add` will be handed, from what a person typed.

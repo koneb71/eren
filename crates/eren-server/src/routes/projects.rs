@@ -1,8 +1,8 @@
-use super::{internal, ApiError};
+use super::{internal, require_write, ApiError};
 use crate::auth::Caller;
 use crate::AppState;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use eren_core::scope::Owned;
@@ -530,8 +530,10 @@ async fn checkout(
 async fn stash_checkout(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this changes your checkout")?;
     caller.require(&state, Owned::Project(id)).await?;
     let path = dirty_git_project(&state, id).await?;
     let repo = std::path::Path::new(&path);
@@ -551,9 +553,11 @@ async fn stash_checkout(
 async fn commit_checkout(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this commits in your checkout")?;
     caller.require(&state, Owned::Project(id)).await?;
     let path = dirty_git_project(&state, id).await?;
     let repo = std::path::Path::new(&path);
@@ -582,8 +586,10 @@ async fn commit_checkout(
 async fn pull_checkout(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this changes your checkout")?;
     caller.require(&state, Owned::Project(id)).await?;
     let (path, vcs) = git_project(&state, id).await?;
     if !vcs {
@@ -602,8 +608,10 @@ async fn pull_checkout(
 async fn push_checkout(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this pushes your checkout")?;
     caller.require(&state, Owned::Project(id)).await?;
     let (path, vcs) = git_project(&state, id).await?;
     if !vcs {

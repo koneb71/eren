@@ -333,10 +333,16 @@ mod own_secret_tests {
                 if path.extension().is_none_or(|e| e != "rs") || path.ends_with("env_guard.rs") {
                     continue;
                 }
+                // The pty crate has a builder of its own, which the terminal
+                // route uses and strips `own_secrets()` from by hand — its
+                // test proves it. Nowhere else may.
+                let terminal = path.ends_with("routes/terminal.rs");
                 let source = std::fs::read_to_string(&path).unwrap();
                 for (n, line) in source.lines().enumerate() {
                     let code = line.split("//").next().unwrap_or("");
-                    if code.contains("Command::new(") {
+                    if code.contains("Command::new(")
+                        || (code.contains("CommandBuilder::new(") && !terminal)
+                    {
                         offenders.push(format!("{}:{}", path.display(), n + 1));
                     }
                 }

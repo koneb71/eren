@@ -34,7 +34,9 @@ export type AttentionEvent =
 
 export interface AttentionSettingsValue {
   enabled: boolean;
-  command: string;
+  /** The admin's alone: null for everyone else (it is often a webhook URL
+   *  with a token in it). */
+  command: string | null;
   events: AttentionEvent[];
   hookTimeoutSecs: number;
   /** 0 means wait indefinitely. */
@@ -2151,7 +2153,7 @@ export const api = {
     }).then((r) => json<{ defaultMode: PermissionMode }>(r)),
   /** Clear every agent's own preset so they follow the workspace default. */
   applyPermissionsToAgents: () =>
-    post("/api/settings/permissions/apply-to-agents").then((r) =>
+    guarded("POST", "/api/settings/permissions/apply-to-agents").then((r) =>
       json<{ cleared: number }>(r),
     ),
   /** Let agents work in this project without stopping to ask. */
@@ -2262,20 +2264,20 @@ export const api = {
   projectCheckout: (projectId: string) =>
     fetch(`/api/projects/${projectId}/checkout`).then((r) => json<CheckoutState>(r)),
   pullCheckout: (projectId: string) =>
-    post(`/api/projects/${projectId}/checkout/pull`).then((r) =>
+    guarded("POST", `/api/projects/${projectId}/checkout/pull`).then((r) =>
       json<{ pulled: boolean; detail: string }>(r),
     ),
   pushCheckout: (projectId: string) =>
-    post(`/api/projects/${projectId}/checkout/push`).then((r) =>
+    guarded("POST", `/api/projects/${projectId}/checkout/push`).then((r) =>
       json<{ pushed: boolean; detail: string }>(r),
     ),
   stashCheckout: (projectId: string) =>
-    post(`/api/projects/${projectId}/checkout/stash`, {}).then((r) =>
+    guarded("POST", `/api/projects/${projectId}/checkout/stash`, {}).then((r) =>
       json<{ stashed: boolean; undo: string }>(r),
     ),
   /** No message = the merge-unblock button's old wording ("Work in progress"). */
   commitCheckout: (projectId: string, message?: string) =>
-    post(`/api/projects/${projectId}/checkout/commit`, message ? { message } : {}).then((r) =>
+    guarded("POST", `/api/projects/${projectId}/checkout/commit`, message ? { message } : {}).then((r) =>
       json<{ committed: boolean; undo: string }>(r),
     ),
   effortSettings: () =>
@@ -2302,24 +2304,22 @@ export const api = {
       json<{ servers: McpServer[] }>(r),
     ),
   createMcpServer: (body: Record<string, unknown>) =>
-    post("/api/mcp-servers", body).then((r) => json<McpServer>(r)),
+    guarded("POST", "/api/mcp-servers", body).then((r) => json<McpServer>(r)),
   updateMcpServer: (id: string, body: Record<string, unknown>) =>
-    patch(`/api/mcp-servers/${id}`, body).then((r) => json<McpServer>(r)),
+    guarded("PATCH", `/api/mcp-servers/${id}`, body).then((r) => json<McpServer>(r)),
   deleteMcpServer: (id: string) =>
-    fetch(`/api/mcp-servers/${id}`, { method: "DELETE" }).then(json),
+    guarded("DELETE", `/api/mcp-servers/${id}`).then(json),
   /** Connect and ask what tools it offers. Slow by nature — it starts the server. */
   testMcpServer: (id: string) =>
-    post(`/api/mcp-servers/${id}/test`).then((r) => json<McpTestResult>(r)),
+    guarded("POST", `/api/mcp-servers/${id}/test`).then((r) => json<McpTestResult>(r)),
   agentMcpServers: (agentId: string) =>
     fetch(`/api/agents/${agentId}/mcp-servers`).then((r) =>
       json<{ serverIds: string[] }>(r),
     ),
   setAgentMcpServers: (agentId: string, serverIds: string[]) =>
-    fetch(`/api/agents/${agentId}/mcp-servers`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ server_ids: serverIds }),
-    }).then((r) => json<{ serverIds: string[] }>(r)),
+    guarded("PUT", `/api/agents/${agentId}/mcp-servers`, { server_ids: serverIds }).then((r) =>
+      json<{ serverIds: string[] }>(r),
+    ),
 
   // tasks
   tasks: (opts: { workspaceId?: string; projectId?: string }) => {
@@ -2512,7 +2512,8 @@ export const api = {
    */
   setAttentionSettings: (v: {
     enabled: boolean;
-    command: string;
+    /** Left out, the server keeps the command it has. */
+    command?: string;
     events: AttentionEvent[];
     waitSecs: number;
   }) =>
@@ -2713,7 +2714,7 @@ export const api = {
   /** `force` + `note`: merge past what the review policy still wants. A
    *  refusal by the policy throws `MergeGateError` with what is unmet. */
   merge: (taskId: string, force?: { note: string }) =>
-    post(`/api/tasks/${taskId}/merge`, force ? { force: true, note: force.note } : undefined).then(async (r) => {
+    guarded("POST", `/api/tasks/${taskId}/merge`, force ? { force: true, note: force.note } : undefined).then(async (r) => {
       if (r.status === 409) {
         const text = await r.text();
         let gate: { kind?: string; unmet?: Unmet[] } | null = null;
@@ -2823,7 +2824,7 @@ export const api = {
     ),
   /** Stops the queue handing out new runs. In-flight work is left alone. */
   pauseQueue: (paused: boolean) =>
-    post(`/api/queue/${paused ? "pause" : "resume"}`).then((r) =>
+    guarded("POST", `/api/queue/${paused ? "pause" : "resume"}`).then((r) =>
       json<{ paused: boolean }>(r),
     ),
   /** Dollars per day; null removes the cap. */

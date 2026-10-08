@@ -88,14 +88,43 @@ pub fn host_only(set_cookie: &str) -> String {
     kept.join(";")
 }
 
+/// Cookies the dashboard sets, which are never a preview's business.
+const OWN_COOKIES: [&str; 2] = [crate::access::COOKIE, crate::auth::COOKIE];
+
+/// A `Cookie` header line without Eren's own cookies. They are host-only to
+/// the dashboard's host, so a browser does not send them to a preview's
+/// hostname today; this keeps that true of a client that does.
+fn without_own_cookies(line: &str) -> String {
+    line.split(';')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .filter(|c| {
+            let name = c.split('=').next().unwrap_or("").trim();
+            !OWN_COOKIES.contains(&name)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn forwardable(headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers {
         let n = name.as_str().to_ascii_lowercase();
         // `host` is rewritten by the client to the upstream authority; copying
         // ours would tell the container it is being served at a name it does
-        // not know.
-        if n == "host" || HOP_BY_HOP.contains(&n.as_str()) {
+        // not know. `authorization` is the access token when a script sends
+        // one, and a preview is an unreviewed branch's code: it gets neither
+        // that nor the dashboard's cookies.
+        if n == "host" || n == "authorization" || HOP_BY_HOP.contains(&n.as_str()) {
+            continue;
+        }
+        if n == "cookie" {
+            let kept = value.to_str().map(without_own_cookies).unwrap_or_default();
+            if !kept.is_empty() {
+                if let Ok(v) = HeaderValue::from_str(&kept) {
+                    out.append(name.clone(), v);
+                }
+            }
             continue;
         }
         out.insert(name.clone(), value.clone());
@@ -407,12 +436,34 @@ mod tests {
         headers.insert("connection", "keep-alive".parse().unwrap());
         headers.insert("accept", "text/html".parse().unwrap());
         headers.insert("cookie", "session=abc".parse().unwrap());
+        headers.insert("authorization", "Bearer the-access-token".parse().unwrap());
         let out = forwardable(&headers);
         assert!(out.get("host").is_none());
         assert!(out.get("connection").is_none());
         // The preview's own cookies must survive, or nothing with a login works.
         assert_eq!(out.get("cookie").unwrap(), "session=abc");
         assert_eq!(out.get("accept").unwrap(), "text/html");
+        // The access token is the dashboard's, never a branch's.
+        assert!(out.get("authorization").is_none());
+    }
+
+    /// Eren's own cookies stay on Eren's side of the proxy; the preview's
+    /// own are delivered untouched.
+    #[test]
+    fn the_dashboards_cookies_do_not_reach_a_preview() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            "eren_access=tok; session=abc; eren_session=sess; theme=dark"
+                .parse()
+                .unwrap(),
+        );
+        let out = forwardable(&headers);
+        assert_eq!(out.get("cookie").unwrap(), "session=abc; theme=dark");
+
+        let mut only_ours = HeaderMap::new();
+        only_ours.insert("cookie", "eren_session=sess".parse().unwrap());
+        assert!(forwardable(&only_ours).get("cookie").is_none());
     }
 
     #[test]

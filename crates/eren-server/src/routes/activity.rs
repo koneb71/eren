@@ -5,7 +5,7 @@
 //! at a time, after the fact. This is the operations view: what is running,
 //! what is waiting, what is blocked on you, and what the last week cost.
 
-use super::{internal, ApiError};
+use super::{internal, require_write, ApiError};
 use crate::auth::{Admin, Caller};
 use crate::AppState;
 use axum::extract::{Query, State};
@@ -71,7 +71,12 @@ async fn set_budget(
     ))
 }
 
-async fn pause(State(state): State<AppState>, _admin: Admin) -> Result<Json<Value>, ApiError> {
+async fn pause(
+    State(state): State<AppState>,
+    _admin: Admin,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this stops the queue")?;
     state
         .orchestrator
         .set_queue_paused(true)
@@ -80,7 +85,12 @@ async fn pause(State(state): State<AppState>, _admin: Admin) -> Result<Json<Valu
     Ok(Json(json!({ "paused": true })))
 }
 
-async fn resume(State(state): State<AppState>, _admin: Admin) -> Result<Json<Value>, ApiError> {
+async fn resume(
+    State(state): State<AppState>,
+    _admin: Admin,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this starts the queue")?;
     state
         .orchestrator
         .set_queue_paused(false)

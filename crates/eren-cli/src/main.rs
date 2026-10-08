@@ -663,16 +663,20 @@ async fn start_embedded_postgres(
         Ok(p) if !p.trim().is_empty() => p.trim().to_string(),
         _ => {
             use rand::distr::{Alphanumeric, SampleString};
+            use std::io::Write;
             let p = Alphanumeric.sample_string(&mut rand::rng(), 32);
-            tokio::fs::write(&password_file, &p).await?;
+            // Created with its final permissions in one step, like the access
+            // token: no moment where another account on the machine could
+            // read it.
+            let _ = std::fs::remove_file(&password_file);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &password_file,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
+            options.open(&password_file)?.write_all(p.as_bytes())?;
             p
         }
     };

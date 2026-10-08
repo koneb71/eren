@@ -58,7 +58,12 @@ export function AttentionSettings() {
     setBusy(true);
     setError(null);
     try {
-      const saved = await api.setAttentionSettings({ ...v, ...patch });
+      // The command is sent only when this person may see it: an absent
+      // field leaves the server's copy as it is.
+      const { command, ...rest } = { ...v, ...patch };
+      const saved = await api.setAttentionSettings(
+        command === null ? rest : { ...rest, command },
+      );
       setV(saved);
       setWarning(saved.warning ?? null);
     } catch (e) {
@@ -135,9 +140,9 @@ export function AttentionSettings() {
       {v.enabled && (
         <div className="mt-3 rounded-xl border border-border bg-bg p-3">
           <input
-            defaultValue={v.command}
-            disabled={busy}
-            onBlur={(e) => e.target.value !== v.command && save({ command: e.target.value })}
+            defaultValue={v.command ?? ""}
+            disabled={busy || v.command === null}
+            onBlur={(e) => e.target.value !== (v.command ?? "") && save({ command: e.target.value })}
             placeholder={EXAMPLES[0].command}
             className="w-full rounded-lg border border-border bg-panel px-2 py-1.5 font-mono text-xs outline-none focus:border-accent"
           />

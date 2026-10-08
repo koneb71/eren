@@ -56,7 +56,11 @@ What holds that together is the bind address:
 The writes that store or run a command, answer for you, or change what gates a merge also
 require an `X-Eren-Write` header: saving a file from the Files tab, storing or running a
 project's checks, the attention hook, the unattended-runs setting, budgets, the review policy,
-restoring a config revision, and answering an inbox item. The header's value is checked against
+restoring a config revision, answering an inbox item, merging a card, the checkout's own
+pull, push, stash and commit, pausing the queue, clearing every agent's permission preset, and
+adding, changing, removing or testing an MCP server (the test runs its command at once) or
+handing one to an agent. Those last ones take no JSON body, or none the browser needs a
+preflight for, so without the header the `Origin` check alone stood in front of them. The header's value is checked against
 nothing and is not a secret; its only job is to be one a cross-origin page cannot set. There is
 no CORS layer, so a preflight for it gets no `Access-Control-Allow-*` and the browser never sends
 the real request. It is belt and braces behind the `Origin` check, not a replacement for it.
@@ -192,7 +196,8 @@ a loopback peer — the agent CLIs, identified by the live run in their URL as b
 - Every route handler takes the caller (a source scan in `routes/mod.rs` fails the build for
   one that does not) and checks that each id it is handed — in the path, the query or the
   body — lives in a workspace that caller owns (`eren_core::scope`), answering 404 rather
-  than 403 so ids cannot be probed. Machine-wide settings, the queue, machine-scope budgets and
+  than 403 so ids cannot be probed. The attention hook's command is shown to the admin only
+  (it is often a webhook URL with a token in it). Machine-wide settings, the queue, machine-scope budgets and
   the audit log are the admin's alone.
 - Sign-up is closed until the admin opens it under Users; while it is open, anyone who can
   reach the dashboard may create an account. Closed by default because accounts are turned on

@@ -1,8 +1,8 @@
-use super::{attachments, internal, ApiError};
+use super::{attachments, internal, require_write, ApiError};
 use crate::auth::Caller;
 use crate::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use eren_core::runs::follow_up::FollowUp;
@@ -663,9 +663,13 @@ fn merge_body(raw: &[u8]) -> Result<MergeBody, ApiError> {
 async fn merge(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, ApiError> {
+    // A merge is irreversible and takes no JSON body, so nothing but this
+    // header stood between it and a cross-origin simple request.
+    require_write(&headers, "merging lands a card's work in your checkout")?;
     caller.require(&state, Owned::Task(id)).await?;
     let body = merge_body(&body)?;
     let row = sqlx::query(

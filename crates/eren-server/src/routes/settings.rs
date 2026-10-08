@@ -349,7 +349,9 @@ async fn set_permissions(
 async fn apply_to_agents(
     State(state): State<AppState>,
     _admin: Admin,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
+    super::require_write(&headers, "this clears every agent's own permission preset")?;
     let cleared = sqlx::query(
         "UPDATE agents SET permission_preset = NULL WHERE permission_preset IS NOT NULL",
     )
@@ -391,9 +393,14 @@ pub(crate) async fn set_unattended(
 /// The stored value is a shell command this server will execute, so anything
 /// that can reach this endpoint has remote code execution. It carries the same
 /// header gate every dashboard write carries — see `super::require_write`.
-async fn get_attention(State(state): State<AppState>, _caller: Caller) -> Json<Value> {
+///
+/// Read by every account, since the events and the window shape what each
+/// person's runs do; the command itself — often a webhook URL with a token in
+/// it — is the admin's, like its revision history, and is withheld from
+/// everyone else.
+async fn get_attention(State(state): State<AppState>, caller: Caller) -> Json<Value> {
     let a = eren_core::attention::load(&state.db).await;
-    Json(attention_json(&a, None))
+    Json(attention_json(&a, None, caller.is_admin()))
 }
 
 #[derive(Deserialize)]
@@ -444,13 +451,17 @@ pub(crate) async fn set_attention(
     let saved = eren_core::attention::save(&state.db, next)
         .await
         .map_err(internal)?;
-    Ok(Json(attention_json(&saved, warning)))
+    Ok(Json(attention_json(&saved, warning, true)))
 }
 
-fn attention_json(a: &eren_core::attention::Attention, warning: Option<String>) -> Value {
+fn attention_json(
+    a: &eren_core::attention::Attention,
+    warning: Option<String>,
+    show_command: bool,
+) -> Value {
     json!({
         "enabled": a.enabled,
-        "command": a.command,
+        "command": if show_command { Value::String(a.command.clone()) } else { Value::Null },
         "events": a.events.iter().map(|e| e.as_str()).collect::<Vec<_>>(),
         "hookTimeoutSecs": a.hook_timeout_secs,
         "waitSecs": a.wait_secs,

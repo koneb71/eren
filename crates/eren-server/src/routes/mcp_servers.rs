@@ -5,11 +5,11 @@
 //! never used the tool. Checking at the point of configuration is the only
 //! place the feedback is cheap.
 
-use super::{internal, ApiError};
+use super::{internal, require_write, ApiError};
 use crate::auth::Caller;
 use crate::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use eren_core::mcp_servers::{check_env, slug_name};
@@ -125,8 +125,10 @@ fn validate(body: &ServerBody) -> Result<(String, String), ApiError> {
 async fn create(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Json(body): Json<ServerBody>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this stores a command this machine will run")?;
     let workspace_id = body
         .workspace_id
         .ok_or_else(|| bad("workspace_id is required"))?;
@@ -165,9 +167,11 @@ async fn create(
 async fn update(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<ServerBody>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this changes a command this machine will run")?;
     caller.require(&state, Owned::McpServer(id)).await?;
     if let Some(env) = &body.env {
         check_env(env).map_err(|e| bad(e.to_string()))?;
@@ -217,8 +221,10 @@ async fn update(
 async fn remove(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this removes a server agents are launched with")?;
     caller.require(&state, Owned::McpServer(id)).await?;
     sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
         .bind(id)
@@ -236,8 +242,10 @@ async fn remove(
 async fn test(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this runs the server's command on this machine")?;
     caller.require(&state, Owned::McpServer(id)).await?;
     let row = sqlx::query(&format!("SELECT {COLUMNS} FROM mcp_servers WHERE id = $1"))
         .bind(id)
@@ -429,9 +437,11 @@ struct AgentServers {
 async fn set_for_agent(
     State(state): State<AppState>,
     caller: Caller,
+    headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
     Json(body): Json<AgentServers>,
 ) -> Result<Json<Value>, ApiError> {
+    require_write(&headers, "this decides what an agent is launched with")?;
     caller.require(&state, Owned::Agent(agent_id)).await?;
     // Each server too: handing an agent someone else's server would run
     // their command, with their headers, inside this agent's runs.
