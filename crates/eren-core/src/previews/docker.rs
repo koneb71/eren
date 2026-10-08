@@ -259,11 +259,14 @@ pub(crate) const PREVIEW_PIDS: u64 = 512;
 ///
 /// What this does *not* do is cut the container off from the host's network
 /// namespace, which on Docker Desktop means `host.docker.internal` resolves
-/// and Eren's own API is reachable from inside. That is survivable only
-/// because the dashboard already refuses any request whose Host or Origin is
-/// not loopback — see `reject_non_local_callers`. Worth stating plainly here,
-/// because if that check is ever loosened this becomes a way to drive Eren
-/// from inside a branch under review.
+/// and Eren's own port is reachable from inside. What stands in front of it
+/// is the access token (`eren_server::access`), which exists on every bind:
+/// the container's connection arrives with the gateway's address as its peer,
+/// not loopback, so it is refused without the token — and the token is never
+/// in a container's environment. The Host check is *not* the defence: any
+/// program sets that header itself. Worth stating plainly here, because if
+/// the token were ever made conditional on a wide bind again, this would be a
+/// way to drive Eren from inside a branch under review.
 pub async fn run(
     image: &str,
     name: &str,

@@ -10,13 +10,21 @@
 //!   through a browser; this list is the names *you* reach it by, and nothing
 //!   else gets added.
 //! - **The access token** — required of every caller that is not this machine,
-//!   whenever Eren listens beyond loopback. A browser is given it once by an
+//!   whatever address Eren listens on. A browser is given it once by an
 //!   access link (`/?access=…`), which trades it for a cookie and redirects the
 //!   token out of the address bar; a script sends `Authorization: Bearer …`.
-//!   Generated on first use and kept in `~/.eren/access_token` (0600), or set
+//!   Generated on first start and kept in `~/.eren/access_token` (0600), or set
 //!   with `EREN_ACCESS_TOKEN`; `EREN_ACCESS_TOKEN=off` goes back to the old,
-//!   unauthenticated behaviour, which then has to be acknowledged with
-//!   `EREN_TRUST_NETWORK`.
+//!   unauthenticated behaviour, which on a wide bind then has to be
+//!   acknowledged with `EREN_TRUST_NETWORK`.
+//!
+//! The token exists on a loopback bind too, and it is not pedantry. A
+//! loopback-bound port is reached by more than this machine's own processes:
+//! Docker Desktop delivers a container's connection to `host.docker.internal`
+//! with the gateway's address as the peer, and a preview container is an
+//! unreviewed branch's code. The Host check does not stop it — any program
+//! sets that header itself — so the token is what does. Nothing changes for
+//! this machine: a loopback peer is never asked.
 //!
 //! "Not this machine" is the TCP peer, never a header: a header is whatever
 //! the caller says. The spawned agent CLIs reach `/mcp` over loopback, so they
@@ -183,6 +191,17 @@ pub fn load_or_create_token(path: &Path) -> std::io::Result<String> {
     use std::io::Write;
     options.open(path)?.write_all(token.as_bytes())?;
     Ok(token)
+}
+
+/// The token this server runs with, from its setting: the one given, the one
+/// in `path` (made if there is none yet), or none at all when it was turned
+/// off. Asked on every bind, not only a wide one — see the module comment.
+pub fn token_for(setting: TokenSetting, path: &Path) -> std::io::Result<Option<String>> {
+    match setting {
+        TokenSetting::Given(t) => Ok(Some(t)),
+        TokenSetting::Generated => load_or_create_token(path).map(Some),
+        TokenSetting::Off => Ok(None),
+    }
 }
 
 /// What to do with one request.
@@ -391,12 +410,36 @@ mod tests {
         h
     }
 
+    /// `EREN_ACCESS_TOKEN=off` is the only way to have no token at all, and
+    /// then a wide bind has to be acknowledged (`crate::exposure`).
     #[test]
-    fn with_no_token_everything_passes_as_before() {
+    fn with_the_token_off_everything_passes() {
         assert_eq!(
             judge(None, lan(), &HeaderMap::new(), &uri("/api/tasks")),
             Verdict::Pass
         );
+    }
+
+    /// The token is on whatever the bind: a loopback-bound port can still be
+    /// reached by a container through a gateway, and that peer must be asked.
+    #[test]
+    fn the_token_is_on_whatever_the_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access_token");
+        let generated = token_for(TokenSetting::Generated, &path).unwrap().unwrap();
+        assert!(generated.len() >= 60);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), generated);
+
+        let given = token_for(TokenSetting::Given(TOKEN.into()), &dir.path().join("unused"))
+            .unwrap();
+        assert_eq!(given.as_deref(), Some(TOKEN));
+        assert!(!dir.path().join("unused").exists());
+
+        assert_eq!(
+            token_for(TokenSetting::Off, &dir.path().join("off")).unwrap(),
+            None
+        );
+        assert!(!dir.path().join("off").exists());
     }
 
     #[test]

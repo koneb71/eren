@@ -216,13 +216,13 @@ async fn serve(port: u16, headless: bool) -> anyhow::Result<()> {
     adopt_legacy_state()?;
 
     // After the home folder is where it belongs, because the token lives in it.
-    let token = match (exposure, token_setting) {
-        (eren_server::Exposure::Protected, eren_server::access::TokenSetting::Given(t)) => Some(t),
-        (eren_server::Exposure::Protected, _) => Some(eren_server::access::load_or_create_token(
-            &eren_shared::brand::home().join("access_token"),
-        )?),
-        _ => None,
-    };
+    // On every bind, not only a wide one: a loopback-bound port is still
+    // reached by a container through Docker's gateway, and that peer is not
+    // this machine — see `eren_server::access`.
+    let token = eren_server::access::token_for(
+        token_setting,
+        &eren_shared::brand::home().join("access_token"),
+    )?;
     let access = std::sync::Arc::new(eren_server::access::Access::new(hosts, token));
     let home = eren_shared::brand::home();
     tokio::fs::create_dir_all(&home).await?;

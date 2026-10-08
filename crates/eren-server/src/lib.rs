@@ -53,7 +53,12 @@ pub fn app(state: AppState) -> Router {
                 audit_layer::record,
             )),
         )
-        .nest("/mcp", mcp::mcp_router())
+        // The agent CLIs are always on this machine, so nothing else is
+        // answered here — not a token holder, not a signed-in account.
+        .nest(
+            "/mcp",
+            mcp::mcp_router().route_layer(middleware::from_fn(mcp::this_machine_only)),
+        )
         .route("/ws", axum::routing::get(ws::ws_handler))
         // At the root, not under /api: the dashboard dials /ws/terminal/…,
         // and a WebSocket handshake that lands on the SPA fallback gets a 200
@@ -287,10 +292,18 @@ pub const TRUST_NETWORK: &str = "EREN_TRUST_NETWORK";
 pub const ACCESS_TOKEN: &str = "EREN_ACCESS_TOKEN";
 
 /// Whether [`TRUST_NETWORK`] is set — under either spelling — to anything but
-/// empty or `0`.
+/// empty, `0`, `false`, `no` or `off`. Those spell "not set" in every `.env`
+/// written by hand, and reading one of them as trust would start an
+/// unauthenticated server because somebody wrote down that they did not want one.
 pub fn network_trusted() -> bool {
-    eren_shared::brand::var("TRUST_NETWORK")
-        .is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
+    eren_shared::brand::var("TRUST_NETWORK").is_some_and(|v| trusted_value(&v))
+}
+
+fn trusted_value(v: &str) -> bool {
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 /// Decide what this bind address means.
@@ -403,6 +416,17 @@ mod tests {
         // And the safer way to be reachable at all.
         assert!(message.contains(ACCESS_TOKEN), "{message}");
         assert_eq!(ACCESS_TOKEN, eren_shared::brand::env_name("ACCESS_TOKEN"));
+    }
+
+    /// `EREN_TRUST_NETWORK=false` is somebody saying no, not yes.
+    #[test]
+    fn saying_no_to_trusting_the_network_is_not_saying_yes() {
+        for no in ["", " ", "0", "false", "FALSE", "no", "off"] {
+            assert!(!trusted_value(no), "{no:?}");
+        }
+        for yes in ["1", "true", "yes", "anything"] {
+            assert!(trusted_value(yes), "{yes:?}");
+        }
     }
 
     #[test]

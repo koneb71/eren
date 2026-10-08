@@ -9,13 +9,43 @@ pub mod org_tools;
 pub mod run_tools;
 
 use crate::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use eren_core::runs::permissions::Decision;
 use serde_json::{json, Value};
+use std::net::{IpAddr, SocketAddr};
 use uuid::Uuid;
+
+/// Whether a peer is this machine: the only place an agent CLI ever calls from.
+pub(crate) fn from_this_machine(peer: Option<IpAddr>) -> bool {
+    peer.is_some_and(|ip| ip.to_canonical().is_loopback())
+}
+
+/// The MCP endpoints answer loopback peers and nobody else, whatever the
+/// account state or the token. Their callers are identified by the run id in
+/// the URL alone — there is no `Caller` here — and the spawned CLIs that hold
+/// those ids are always on this machine. A signed-in account or a token
+/// holder on another machine has no business here, and with a run id it could
+/// park a prompt that stops that run or answer a review ahead of its reviewer.
+pub async fn this_machine_only(req: Request, next: Next) -> Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+    if from_this_machine(peer) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Eren's MCP endpoints answer this machine only.",
+        )
+            .into_response()
+    }
+}
 
 pub fn mcp_router() -> Router<AppState> {
     Router::new()
@@ -243,6 +273,18 @@ fn refusal(decision: &Decision) -> &'static str {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn only_a_loopback_peer_is_this_machine() {
+        for local in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"] {
+            assert!(from_this_machine(Some(local.parse().unwrap())), "{local}");
+        }
+        for away in ["192.168.1.9", "172.17.0.1", "10.0.0.2", "::ffff:192.168.1.9"] {
+            assert!(!from_this_machine(Some(away.parse().unwrap())), "{away}");
+        }
+        // No peer at all fails closed.
+        assert!(!from_this_machine(None));
+    }
 
     #[test]
     fn the_engine_is_never_told_a_person_refused_something_nobody_saw() {
