@@ -82,7 +82,7 @@ impl Op {
             Self::Ne => "<>",
             Self::Gt => ">",
             Self::Gte => ">=",
-            Self::Lt => "<=",
+            Self::Lt => "<",
             Self::Lte => "<=",
             Self::Like => "ILIKE",
             Self::In => "IN",
@@ -454,6 +454,21 @@ mod tests {
         assert_eq!(query.filters[0].field, "note");
         let frag = where_clause(&query, 1);
         assert!(frag.sql.contains("\"note\" = $1::text"), "{}", frag.sql);
+    }
+
+    /// `lt` rendered as `<=` for a while, so a less-than filter also matched
+    /// equal rows; each comparison renders its own operator.
+    #[test]
+    fn comparisons_render_their_own_operator() {
+        for (op, sql) in [("gt", ">"), ("gte", ">="), ("lt", "<"), ("lte", "<=")] {
+            let query = q(&[&format!("qty:{op}:5")]).unwrap();
+            let frag = where_clause(&query, 1);
+            assert!(
+                frag.sql.contains(&format!("\"qty\" {sql} $1::bigint")),
+                "{op}: {}",
+                frag.sql
+            );
+        }
     }
 
     #[test]
