@@ -1056,6 +1056,12 @@ product's names (`brand::NAMES`), so stacks started before the rename are still 
 canvas, TipTap for the knowledge-base editor, Monaco for the files editor (pinned into its
 own chunk), `cmdk` for the palette, Radix for dialogs and `framer-motion` for motion.
 
+Every response the dashboard router serves carries the content-security policy built in
+`eren_server::csp` from the served `index.html` (a hash per inline script — there is one, the
+theme block, and the design scan refuses a second), the knowledge base's embed-host list for
+`frame-src`, and `img-src` limited to Eren, `data:` and `blob:`. It is appended beside any
+policy a handler set, so the attachment download's stricter one still holds.
+
 ### The shell and the palette
 
 `web/src/AppShell.tsx` is sidebar, top bar, page. On a wide screen the sidebar

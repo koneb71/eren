@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // The design system holds only while nothing works around it. Every colour on
@@ -77,5 +78,25 @@ describe("design scan", () => {
     expect(hit(ABSOLUTE, "text-white")).toBe(true);
     expect(hit(ABSOLUTE, "text-whitespace")).toBe(false);
     expect(hit(SCRIM, '<div className="fixed inset-0 z-10" />')).toBe(true);
+  });
+});
+
+// The dashboard's content-security policy allows exactly the inline scripts
+// the served page carries, by hash (`crates/eren-server/src/csp.rs`). One is
+// there on purpose — the theme before first paint. A second one, or an
+// inline handler, would be blocked by the browser and fail silently, so the
+// page is held to what the policy was written for.
+describe("index.html stays within the content-security policy", () => {
+  const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
+
+  it("has exactly one inline script, the theme block", () => {
+    const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>/g)];
+    expect(inline).toHaveLength(1);
+    expect(html).toContain('localStorage.getItem("eren.theme")');
+  });
+
+  it("has no inline event handlers or javascript: URLs", () => {
+    expect(html.match(/\son[a-z]+=/i)).toBeNull();
+    expect(html).not.toMatch(/javascript:/i);
   });
 });

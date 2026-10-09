@@ -6,6 +6,7 @@ pub mod access;
 pub mod app_bridge;
 pub mod audit_layer;
 pub mod auth;
+pub mod csp;
 pub mod mcp;
 pub mod preview_proxy;
 pub mod routes;
@@ -88,6 +89,9 @@ pub fn app(state: AppState) -> Router {
         );
         router = router.fallback_service(serve);
     }
+    // Read once from the page that will be served, so the inline-script
+    // hash in it is always the served page's own.
+    let policy: Arc<str> = csp::for_dist(std::path::Path::new(&dist)).into();
 
     router
         .layer(middleware::from_fn_with_state(
@@ -98,7 +102,12 @@ pub fn app(state: AppState) -> Router {
         // dashboard response carries it — including the 403 above — and no
         // proxied response does. A preview must stay framable; the dashboard
         // must not.
-        .layer(middleware::from_fn(refuse_to_be_framed))
+        .layer(middleware::from_fn(
+            move |req: Request<axum::body::Body>, next: Next| {
+                let policy = policy.clone();
+                async move { refuse_to_be_framed(policy, req, next).await }
+            },
+        ))
         // Outside the loopback check on purpose: a preview hostname is handled
         // here in full and never reaches the dashboard router, so widening what
         // `Host` values are accepted does not widen what can reach the API.
@@ -145,30 +154,31 @@ async fn no_bridge_here() -> (StatusCode, &'static str) {
 /// predates it. Neither reaches a preview or an app, which are *meant* to be
 /// embedded — that is what the layer's position buys.
 async fn refuse_to_be_framed(
+    policy: Arc<str>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> axum::response::Response {
     let mut res = next.run(req).await;
-    harden(res.headers_mut());
+    harden(res.headers_mut(), &policy);
     res
 }
 
 /// The headers every dashboard response carries.
 ///
-/// The policy is *appended*, not inserted: a browser enforces every
+/// The policy (`csp::policy`, `frame-ancestors 'none'` included) is
+/// *appended*, not inserted: a browser enforces every
 /// `Content-Security-Policy` header it receives, so a handler's stricter one
 /// — the attachment download's `default-src 'none'; sandbox` — survives
 /// alongside this one. (It used to be replaced, which quietly undid it.)
 /// `nosniff` keeps a response served as text from being run as script;
 /// `Referrer-Policy` is set only where a handler set none, so the access
 /// link's `no-referrer` stands.
-pub(crate) fn harden(headers: &mut axum::http::HeaderMap) {
+pub(crate) fn harden(headers: &mut axum::http::HeaderMap, policy: &str) {
     use axum::http::header;
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.append(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'"),
-    );
+    if let Ok(v) = HeaderValue::from_str(policy) {
+        headers.append(header::CONTENT_SECURITY_POLICY, v);
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -452,22 +462,23 @@ mod tests {
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         );
-        harden(&mut h);
+        let policy = csp::policy(&[]);
+        harden(&mut h, &policy);
         let policies: Vec<&str> = h
             .get_all(header::CONTENT_SECURITY_POLICY)
             .iter()
             .map(|v| v.to_str().unwrap())
             .collect();
-        assert_eq!(
-            policies,
-            ["default-src 'none'; sandbox", "frame-ancestors 'none'"]
-        );
+        // The handler's own first, the dashboard's — frame-ancestors
+        // included — second; both are enforced.
+        assert_eq!(policies, ["default-src 'none'; sandbox", policy.as_str()]);
+        assert!(policy.contains("frame-ancestors 'none'"));
         assert_eq!(h.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
         assert_eq!(h.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
         assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
 
         let mut plain = axum::http::HeaderMap::new();
-        harden(&mut plain);
+        harden(&mut plain, &policy);
         assert_eq!(plain.get(header::REFERRER_POLICY).unwrap(), "same-origin");
         assert_eq!(
             plain

@@ -17,8 +17,11 @@ use std::collections::HashSet;
 /// Hosts whose iframes are allowed through.
 ///
 /// Deliberately short. Every entry is a site whose embed player is the
-/// ordinary way to put a video in a document; anything else is a link.
-const EMBED_HOSTS: &[&str] = &[
+/// ordinary way to put a video in a document; anything else is a link. The
+/// dashboard's content-security policy (`eren_server::csp`) reads this same
+/// list for its `frame-src`, so an embed the sanitiser keeps is one the
+/// browser is allowed to show.
+pub const EMBED_HOSTS: &[&str] = &[
     "www.youtube.com",
     "youtube.com",
     "www.youtube-nocookie.com",

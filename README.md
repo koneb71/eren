@@ -930,6 +930,11 @@ memory**:
   whether a person or an agent wrote it — including the versions that were
   turned down.
 
+Images in a page are uploaded to Eren's object storage and served by Eren; an image on
+another site does not load, in a page or in an agent's markdown, because the dashboard's
+content-security policy allows images from Eren alone (an image URL is also how a
+prompt-injected model would carry text out). Video embeds from YouTube, Vimeo and Loom work.
+
 Editing has no Save button: typing saves. Every save carries the revision it
 started from, so if the page moved under you the server refuses rather than
 overwriting, and you get a diff and a choice instead of a lost afternoon.

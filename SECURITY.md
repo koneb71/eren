@@ -46,13 +46,20 @@ What holds that together is the bind address:
   a web page, and browsers attach `Origin` to exactly the cross-origin requests that matter,
   WebSocket upgrades included. Both checks live in `reject_non_local_callers` in
   `crates/eren-server/src/lib.rs`.
-- Dashboard responses carry `X-Frame-Options: DENY` and `frame-ancestors 'none'`, because the UI
-  is made of one-click irreversible actions — a permission prompt's **Allow**, a squash-merge —
-  and an invisible iframe positioned under something innocuous would collect one of those clicks.
-  The policy is appended, so a handler's stricter one (an attachment download's
-  `default-src 'none'; sandbox`) is enforced beside it; every response also gets
-  `X-Content-Type-Options: nosniff` and a `Referrer-Policy` of `same-origin` where the handler
-  set none. Previews and apps are meant to be embedded and deliberately sit outside that layer.
+- Dashboard responses carry `X-Frame-Options: DENY` and a content-security policy
+  (`crates/eren-server/src/csp.rs`): scripts only from Eren plus a hash of the one inline
+  script the page carries (read from the served page at start, so it cannot go stale); no
+  `unsafe-eval`; images only from Eren, `data:` and `blob:` — an `<img src="https://…">` in a
+  stored page or a model's markdown is the classic prompt-injection exfiltration channel and
+  does not load; frames only the app iframe and the video embed hosts the knowledge base
+  allows (the same list); and `frame-ancestors 'none'`, because the UI is made of one-click
+  irreversible actions — a permission prompt's **Allow**, a squash-merge — and an invisible
+  iframe positioned under something innocuous would collect one of those clicks. Styles allow
+  `unsafe-inline`, which the editor, Monaco and the terminal need. The policy is appended, so
+  a handler's stricter one (an attachment download's `default-src 'none'; sandbox`) is enforced
+  beside it; every response also gets `X-Content-Type-Options: nosniff` and a `Referrer-Policy`
+  of `same-origin` where the handler set none. Previews and apps are meant to be embedded and
+  deliberately sit outside that layer.
 - A URL the dashboard did not make — an agent's `WebFetch` argument, a GitHub record, a server-
   supplied address — becomes a link only when `safeHttpUrl` (`web/src/lib/url.ts`) says it is
   `http` or `https`; React only warns about a `javascript:` href and renders it anyway.
@@ -314,6 +321,12 @@ credentials, because a check that refuses "the API key lives in 1Password" is a 
 route around. If it fires, rotate the secret: it has been typed, so treat it as exposed. Neither
 check is a guarantee. Nothing stops you pasting a key into a card prompt, and that prompt goes
 to a model and stays readable in the run transcript.
+
+An MCP server's headers — where its credential lives, `Authorization: Bearer …` — are stored
+for the run and handed to the CLI, and never returned: the API lists them as names with every
+value masked, and a change that sends the mask back keeps what is stored under that name
+(`eren_core::mcp_servers::masked_headers`, `merge_masked_headers`). A server's `env` is shown
+as it is: its keys are refused when auth-shaped, and the dashboard edits it as text.
 
 Run transcripts, prompts, diffs and costs are stored in Postgres, and Eren boots and manages
 its own cluster under `~/.eren/pgdata` unless `DATABASE_URL` is set. Assume everything an

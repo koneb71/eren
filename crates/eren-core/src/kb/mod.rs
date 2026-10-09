@@ -5,6 +5,7 @@ pub mod diff;
 pub mod render;
 pub mod revisions;
 pub mod sanitize;
+pub use sanitize::EMBED_HOSTS;
 pub mod tree;
 pub mod write;
 
