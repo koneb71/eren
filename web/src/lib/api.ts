@@ -1241,6 +1241,9 @@ export interface McpServer {
   args: string[];
   env: Record<string, string>;
   url: string | null;
+  /** Names only: every value reads as the mask (`••••••`). A credential
+   *  stored here is handed to the CLI for a run and never returned. Sending
+   *  the mask back on a PATCH keeps what is stored under that name. */
   headers: Record<string, string>;
   enabled: boolean;
   /** What the model sees its tools called, e.g. `mcp__playwright`. */

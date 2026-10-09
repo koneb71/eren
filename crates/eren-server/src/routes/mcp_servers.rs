@@ -12,7 +12,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use eren_core::mcp_servers::{check_env, slug_name};
+use eren_core::mcp_servers::{check_env, masked_headers, merge_masked_headers, slug_name, MASK};
 use eren_core::scope::Owned;
 use eren_shared::env_guard;
 use serde::Deserialize;
@@ -64,7 +64,10 @@ fn server_json(r: &sqlx::postgres::PgRow) -> Value {
         "args": r.get::<Vec<String>, _>("args"),
         "env": r.get::<Value, _>("env"),
         "url": r.get::<Option<String>, _>("url"),
-        "headers": r.get::<Value, _>("headers"),
+        // Names only: the values are a server's credential, stored for the
+        // run and never returned. `env` is shown as it is — its keys are
+        // refused when auth-shaped, and the dashboard edits it as text.
+        "headers": masked_headers(&r.get::<Value, _>("headers")),
         "enabled": r.get::<bool, _>("enabled"),
         // What the model will see its tools called, so the UI can show it
         // rather than leaving the naming rule to be discovered.
@@ -73,6 +76,13 @@ fn server_json(r: &sqlx::postgres::PgRow) -> Value {
 }
 
 const COLUMNS: &str = "id, name, transport, command, args, env, url, headers, enabled";
+
+/// Whether any header value in `headers` is the mask.
+fn sent_a_mask(headers: Option<&Value>) -> bool {
+    headers
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.values().any(|v| v.as_str() == Some(MASK)))
+}
 
 async fn list(
     State(state): State<AppState>,
@@ -136,6 +146,11 @@ async fn create(
         .require(&state, Owned::Workspace(workspace_id))
         .await?;
     let (name, transport) = validate(&body)?;
+    if sent_a_mask(body.headers.as_ref()) {
+        return Err(bad(format!(
+            "a header value cannot be {MASK}: there is nothing stored yet to keep"
+        )));
+    }
 
     let row = sqlx::query(&format!(
         "INSERT INTO mcp_servers (workspace_id, name, transport, command, args, env, url, headers)
@@ -176,6 +191,23 @@ async fn update(
     if let Some(env) = &body.env {
         check_env(env).map_err(|e| bad(e.to_string()))?;
     }
+    // A sent header equal to the mask means "keep what is stored under that
+    // name" — the form a reader was given — so the stored row is read first.
+    let headers = match body.headers.clone() {
+        Some(sent) => {
+            let stored: Option<Value> =
+                sqlx::query_scalar("SELECT headers FROM mcp_servers WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&state.db.pool)
+                    .await
+                    .map_err(internal)?;
+            Some(merge_masked_headers(
+                sent,
+                &stored.unwrap_or_else(|| json!({})),
+            ))
+        }
+        None => None,
+    };
     // COALESCE so a patch of one field doesn't blank the rest. `name` is
     // slugged only when present; an empty slug would silently rename the
     // server to nothing and orphan every agent's tool prefix.
@@ -208,7 +240,7 @@ async fn update(
     .bind(body.args.clone())
     .bind(body.env.clone())
     .bind(body.url.as_deref().map(str::trim))
-    .bind(body.headers.clone())
+    .bind(headers)
     .bind(body.enabled)
     .fetch_optional(&state.db.pool)
     .await
@@ -497,5 +529,38 @@ mod tests {
     fn a_tools_reply_with_no_tools_is_still_a_success() {
         let line = r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#;
         assert_eq!(tools_from_reply(line).unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    /// Every row a client is shown goes through `server_json`, and
+    /// `server_json` masks the headers: the credential never leaves.
+    #[test]
+    fn what_a_client_is_shown_has_its_headers_masked() {
+        let src = include_str!("mcp_servers.rs");
+        let start = src.find("fn server_json(").expect("server_json exists");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(
+            body.contains("masked_headers("),
+            "server_json returns raw headers"
+        );
+        // And nothing else builds a row for a client.
+        assert_eq!(src.matches("\"headers\": r.get").count(), 0);
+    }
+
+    #[test]
+    fn a_mask_is_recognised_wherever_it_sits() {
+        assert!(sent_a_mask(Some(&json!({ "Authorization": MASK }))));
+        assert!(sent_a_mask(Some(&json!({ "A": "x", "B": MASK }))));
+        assert!(!sent_a_mask(Some(&json!({ "A": "x" }))));
+        assert!(!sent_a_mask(Some(&json!([MASK]))));
+        assert!(!sent_a_mask(None));
     }
 }

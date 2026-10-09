@@ -103,6 +103,46 @@ impl McpServer {
     }
 }
 
+/// What a header's value reads as outside this process. Headers are where an
+/// MCP server's credential lives (`Authorization: Bearer …`); they are stored
+/// for the run and handed to the CLI, and never returned to a browser.
+pub const MASK: &str = "••••••";
+
+/// `headers` with every value replaced by [`MASK`]: the names, so a person
+/// can see what is set, and nothing else.
+pub fn masked_headers(headers: &Value) -> Value {
+    match headers.as_object() {
+        Some(map) => Value::Object(
+            map.keys()
+                .map(|k| (k.clone(), Value::String(MASK.into())))
+                .collect(),
+        ),
+        None => json!({}),
+    }
+}
+
+/// The headers to store after a change: a value sent as [`MASK`] keeps what
+/// is stored under that name, a new value replaces it, a name left out is
+/// removed. So a client that read the masked form can send it back unchanged
+/// without wiping the credential it never saw.
+pub fn merge_masked_headers(sent: Value, stored: &Value) -> Value {
+    let Some(sent) = sent.as_object() else {
+        return json!({});
+    };
+    let stored = stored.as_object();
+    let mut out = Map::new();
+    for (name, value) in sent {
+        let kept = match value.as_str() {
+            Some(MASK) => stored.and_then(|s| s.get(name)).cloned(),
+            _ => Some(value.clone()),
+        };
+        if let Some(v) = kept {
+            out.insert(name.clone(), v);
+        }
+    }
+    Value::Object(out)
+}
+
 /// Reject the names that would let a config file do what the process spawner
 /// refuses to do.
 pub fn check_env(env: &Value) -> anyhow::Result<()> {
@@ -287,5 +327,47 @@ mod tests {
         assert_eq!(slug_name("  Play Wright! "), "play_wright");
         assert_eq!(slug_name("linear-mcp"), "linear_mcp");
         assert_eq!(slug_name("Postgres (prod)"), "postgres_prod");
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    #[test]
+    fn a_masked_header_shows_its_name_and_nothing_else() {
+        let masked = masked_headers(&json!({ "Authorization": "Bearer sk-live", "X-Team": "a" }));
+        assert_eq!(masked, json!({ "Authorization": MASK, "X-Team": MASK }));
+        assert_eq!(masked_headers(&json!(null)), json!({}));
+        assert_eq!(masked_headers(&json!("not an object")), json!({}));
+    }
+
+    /// The round trip a script makes: read the masked form, change one
+    /// thing, send it all back — and the credential it never saw survives.
+    #[test]
+    fn sending_the_mask_back_keeps_what_is_stored() {
+        let stored = json!({ "Authorization": "Bearer sk-live", "X-Old": "gone" });
+        let sent = json!({ "Authorization": MASK, "X-New": "fresh" });
+        assert_eq!(
+            merge_masked_headers(sent, &stored),
+            json!({ "Authorization": "Bearer sk-live", "X-New": "fresh" })
+        );
+        // A mask for a name that holds nothing keeps nothing.
+        assert_eq!(
+            merge_masked_headers(json!({ "X-Unknown": MASK }), &stored),
+            json!({})
+        );
+        // A new value replaces; an empty object clears; non-objects clear.
+        assert_eq!(
+            merge_masked_headers(json!({ "Authorization": "Bearer other" }), &stored),
+            json!({ "Authorization": "Bearer other" })
+        );
+        assert_eq!(merge_masked_headers(json!({}), &stored), json!({}));
+        assert_eq!(merge_masked_headers(json!(7), &stored), json!({}));
+        // Nothing stored: a mask yields nothing rather than the mask itself.
+        assert_eq!(
+            merge_masked_headers(json!({ "Authorization": MASK }), &json!({})),
+            json!({})
+        );
     }
 }
